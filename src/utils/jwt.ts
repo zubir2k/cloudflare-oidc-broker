@@ -3,7 +3,7 @@ import { SignJWT, importJWK } from 'jose';
 interface MintTokenParams {
   sub: string;
   email: string;
-  emailVerified: boolean; // Fix 4: no longer hardcoded
+  emailVerified: boolean;
   username: string;
   name: string;
   clientId: string;
@@ -25,6 +25,7 @@ export async function mintDownstreamIdToken(params: MintTokenParams): Promise<st
     username: params.username,
     preferred_username: params.username,
     name: params.name,
+    auth_time: now,
     ...(params.nonce ? { nonce: params.nonce } : {})
   })
     .setProtectedHeader({ alg: 'RS256', kid: pubJwk.kid })

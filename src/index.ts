@@ -20,11 +20,26 @@ function generateSecureSecret(length = 48): string {
   return secret;
 }
 
+// Helper function to inject CORS headers for OIDC API endpoints
+function addCorsHeaders(response: Response): Response {
+  response.headers.set('Access-Control-Allow-Origin', '*');
+  response.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  return response;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const pathname = url.pathname.replace(/\/+$/, '');
     const issuer = getIssuer(request);
+
+    // -------------------------------------------------------------
+    // CORS Preflight Handler
+    // -------------------------------------------------------------
+    if (request.method === 'OPTIONS') {
+      return addCorsHeaders(new Response(null, { status: 204 }));
+    }
 
     // -------------------------------------------------------------
     // 0. Favicon Handler (Emoji 🔐)
@@ -57,6 +72,15 @@ export default {
     // 3. Downstream Authorization -> Redirect to Upstream Provider
     // -------------------------------------------------------------
     if (pathname === '/authorize') {
+      // Strict response_type validation (OIDC Basic OP requirement)
+      const responseType = url.searchParams.get('response_type');
+      if (responseType !== 'code') {
+        return Response.json({ 
+          error: 'unsupported_response_type', 
+          error_description: 'Only authorization code flow (response_type=code) is supported.' 
+        }, { status: 400 });
+      }
+
       const clientId = url.searchParams.get('client_id');
       const redirectUri = url.searchParams.get('redirect_uri');
       const state = url.searchParams.get('state') || '';
@@ -65,31 +89,44 @@ export default {
       const codeChallengeMethod = url.searchParams.get('code_challenge_method') || '';
 
       if (!clientId || !redirectUri) {
-        return new Response('Missing client_id or redirect_uri', { status: 400 });
+        return Response.json({ 
+          error: 'invalid_request', 
+          error_description: 'Missing client_id or redirect_uri' 
+        }, { status: 400 });
       }
 
-      // FIX 1: Fetch client FIRST before checking its properties
       const client = await env.DB.prepare('SELECT * FROM clients WHERE client_id = ? AND is_active = 1')
         .bind(clientId)
         .first<ClientRecord>();
 
       if (!client) {
-        return new Response('Unauthorized or inactive client_id', { status: 403 });
+        return Response.json({ 
+          error: 'unauthorized_client', 
+          error_description: 'Unauthorized or inactive client_id' 
+        }, { status: 403 });
       }
 
       const allowedUris: string[] = JSON.parse(client.redirect_uris || '[]');
       if (!allowedUris.includes(redirectUri)) {
-        return new Response('Unauthorized redirect_uri', { status: 400 });
+        return Response.json({ 
+          error: 'invalid_request', 
+          error_description: 'Unauthorized redirect_uri' 
+        }, { status: 400 });
       }
 
-      // FIX 2: Now we can safely check client.require_pkce
       const requirePkce = client.require_pkce !== 0;
       if (requirePkce) {
         if (!codeChallenge || codeChallengeMethod !== 'S256') {
-          return new Response('Invalid request: code_challenge and code_challenge_method=S256 are required', { status: 400 });
+          return Response.json({ 
+            error: 'invalid_request', 
+            error_description: 'code_challenge and code_challenge_method=S256 are required' 
+          }, { status: 400 });
         }
       } else if (codeChallengeMethod && codeChallengeMethod !== 'S256') {
-        return new Response('Invalid request: only S256 is supported for code_challenge_method', { status: 400 });
+        return Response.json({ 
+          error: 'invalid_request', 
+          error_description: 'Only S256 is supported for code_challenge_method' 
+        }, { status: 400 });
       }
 
       const brokerSessionId = crypto.randomUUID();
@@ -116,7 +153,6 @@ export default {
     // 4. Upstream Callback -> Verify User & Issue Downstream Code
     // -------------------------------------------------------------
     if (pathname === '/callback' && (request.method === 'GET' || request.method === 'POST')) {
-      // Support GET (standard) and POST (Apple form_post)
       let code: string | null = null;
       let brokerSessionId: string | null = null;
       if (request.method === 'POST') {
@@ -129,18 +165,31 @@ export default {
       }
 
       if (!code || !brokerSessionId) {
-        return new Response('Invalid callback parameters', { status: 400 });
+        return Response.json({ 
+          error: 'invalid_request', 
+          error_description: 'Invalid callback parameters' 
+        }, { status: 400 });
       }
 
       const sessionRaw = await env.SESSIONS_KV.get(`session:${brokerSessionId}`);
-      if (!sessionRaw) return new Response('Session expired or invalid', { status: 403 });
+      if (!sessionRaw) {
+        return Response.json({ 
+          error: 'invalid_request', 
+          error_description: 'Session expired or invalid' 
+        }, { status: 403 });
+      }
       const session: BrokerSession = JSON.parse(sessionRaw);
       await env.SESSIONS_KV.delete(`session:${brokerSessionId}`);
 
       const sessionClient = await env.DB.prepare('SELECT provider FROM clients WHERE client_id = ? AND is_active = 1')
         .bind(session.clientId)
         .first<{ provider: string }>();
-      if (!sessionClient) return new Response('Client no longer active', { status: 403 });
+      if (!sessionClient) {
+        return Response.json({ 
+          error: 'unauthorized_client', 
+          error_description: 'Client no longer active' 
+        }, { status: 403 });
+      }
 
       const provider = getProvider(sessionClient.provider, env);
       const credentials = getProviderCredentials(sessionClient.provider, env);
@@ -154,11 +203,13 @@ export default {
         });
       } catch (err: any) {
         console.error('Upstream provider error:', err?.message);
-        return new Response('Upstream identity verification failed', { status: 502 });
+        return Response.json({ 
+          error: 'server_error', 
+          error_description: 'Upstream identity verification failed' 
+        }, { status: 502 });
       }
 
-
-      // [INSERTION POINT A]: App-scoped mapping with fallback to global '*'
+      // App-scoped mapping with fallback to global '*'
       const mappedUser = await env.DB.prepare(`
         SELECT * FROM user_mappings 
         WHERE email = ? 
@@ -171,7 +222,11 @@ export default {
         .first<UserMappingRecord>();
 
       if (!mappedUser) {
-        return new Response(`Access Denied: User ${upstreamUser.email} not found.`, { status: 403 });
+        // No email leak - generic error message
+        return Response.json({ 
+          error: 'access_denied', 
+          error_description: 'User is not authorized for this application' 
+        }, { status: 403 });
       }
 
       await env.DB.prepare(
@@ -240,7 +295,10 @@ export default {
       }
 
       if (!code || !clientId) {
-        return Response.json({ error: 'invalid_request', error_description: 'Missing code or client_id' }, { status: 400 });
+        return addCorsHeaders(Response.json({ 
+          error: 'invalid_request', 
+          error_description: 'Missing code or client_id' 
+        }, { status: 400 }));
       }
 
       const client = await env.DB.prepare('SELECT * FROM clients WHERE client_id = ? AND is_active = 1')
@@ -248,32 +306,49 @@ export default {
         .first<ClientRecord>();
 
       if (!client) {
-        return Response.json({ error: 'invalid_client', error_description: 'Client not found or inactive' }, { status: 401 });
+        return addCorsHeaders(Response.json({ 
+          error: 'invalid_client', 
+          error_description: 'Client not found or inactive' 
+        }, { status: 401 }));
       }
 
       if (client.client_secret && client.client_secret !== clientSecret) {
-        return Response.json({ error: 'invalid_client', error_description: 'Unauthorized client credentials' }, { status: 401 });
+        return addCorsHeaders(Response.json({ 
+          error: 'invalid_client', 
+          error_description: 'Unauthorized client credentials' 
+        }, { status: 401 }));
       }
 
       const authDataRaw = await env.SESSIONS_KV.get(`code:${code}`);
       if (!authDataRaw) {
-        return Response.json({ error: 'invalid_grant', error_description: 'Code expired or invalid' }, { status: 400 });
+        return addCorsHeaders(Response.json({ 
+          error: 'invalid_grant', 
+          error_description: 'Code expired or invalid' 
+        }, { status: 400 }));
       }
       const authData: DownstreamAuthCode = JSON.parse(authDataRaw);
       await env.SESSIONS_KV.delete(`code:${code}`);
 
       if (authData.clientId !== clientId) {
-        return Response.json({ error: 'invalid_grant', error_description: 'Client mismatch' }, { status: 400 });
+        return addCorsHeaders(Response.json({ 
+          error: 'invalid_grant', 
+          error_description: 'Client mismatch' 
+        }, { status: 400 }));
       }
 
-      // PKCE verification: mandatory unless client is explicitly exempted
       if (authData.requirePkce) {
         if (!authData.codeChallenge || !codeVerifier) {
-          return Response.json({ error: 'invalid_request', error_description: 'Missing code_challenge or code_verifier' }, { status: 400 });
+          return addCorsHeaders(Response.json({ 
+            error: 'invalid_request', 
+            error_description: 'Missing code_challenge or code_verifier' 
+          }, { status: 400 }));
         }
         const isPkceValid = await verifyPkce(codeVerifier, authData.codeChallenge, authData.codeChallengeMethod || 'S256');
         if (!isPkceValid) {
-          return Response.json({ error: 'invalid_grant', error_description: 'PKCE verification failed' }, { status: 400 });
+          return addCorsHeaders(Response.json({ 
+            error: 'invalid_grant', 
+            error_description: 'PKCE verification failed' 
+          }, { status: 400 }));
         }
       }
 
@@ -292,7 +367,6 @@ export default {
 
       const accessToken = crypto.randomUUID();
 
-      // Cache token session for the subsequent /userinfo verification
       await env.SESSIONS_KV.put(
         `access_token:${accessToken}`,
         JSON.stringify({
@@ -305,12 +379,12 @@ export default {
         { expirationTtl: 3600 }
       );
 
-      return Response.json({
+      return addCorsHeaders(Response.json({
         access_token: accessToken,
         token_type: 'Bearer',
         expires_in: 3600,
         id_token: idToken
-      });
+      }));
     }
 
     // -------------------------------------------------------------
@@ -321,29 +395,35 @@ export default {
       const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
 
       if (!accessToken) {
-        return new Response(JSON.stringify({ error: 'unauthorized', error_description: 'Missing access token' }), {
+        return addCorsHeaders(Response.json({ 
+          error: 'unauthorized', 
+          error_description: 'Missing access token' 
+        }, {
           status: 401,
           headers: { 'Content-Type': 'application/json' }
-        });
+        }));
       }
 
       const cachedRaw = await env.SESSIONS_KV.get(`access_token:${accessToken}`);
       if (!cachedRaw) {
-        return new Response(JSON.stringify({ error: 'invalid_token', error_description: 'Token expired or invalid' }), {
+        return addCorsHeaders(Response.json({ 
+          error: 'invalid_token', 
+          error_description: 'Token expired or invalid' 
+        }, {
           status: 401,
           headers: { 'Content-Type': 'application/json' }
-        });
+        }));
       }
 
       const userData = JSON.parse(cachedRaw);
-      return Response.json({
+      return addCorsHeaders(Response.json({
         sub: userData.sub,
         email: userData.email,
-        email_verified: userData.emailVerified === true, // Strict boolean — no fallback, never assume verified
+        email_verified: userData.emailVerified === true,
         username: userData.username,
         preferred_username: userData.username,
         name: userData.name
-      });
+      }));
     }
 
     // -------------------------------------------------------------
@@ -376,7 +456,10 @@ export default {
       }
 
       if (!token) {
-        return Response.json({ error: 'invalid_request', error_description: 'Missing token parameter' }, { status: 400 });
+        return addCorsHeaders(Response.json({ 
+          error: 'invalid_request', 
+          error_description: 'Missing token parameter' 
+        }, { status: 400 }));
       }
 
       if (clientId) {
@@ -385,12 +468,15 @@ export default {
           .first<ClientRecord>();
 
         if (!client || (client.client_secret && client.client_secret !== clientSecret)) {
-          return Response.json({ error: 'invalid_client', error_description: 'Unauthorized client credentials' }, { status: 401 });
+          return addCorsHeaders(Response.json({ 
+            error: 'invalid_client', 
+            error_description: 'Unauthorized client credentials' 
+          }, { status: 401 }));
         }
       }
 
       await env.SESSIONS_KV.delete(`access_token:${token}`);
-      return new Response(null, { status: 200 });
+      return addCorsHeaders(new Response(null, { status: 200 }));
     }
 
     // -------------------------------------------------------------
@@ -400,9 +486,6 @@ export default {
       const postLogoutRedirectUri = url.searchParams.get('post_logout_redirect_uri');
 
       if (postLogoutRedirectUri) {
-        // Validate against all registered client redirect_uris to prevent open redirect.
-        // Match on origin only (scheme+host+port) - HA sends the root URL e.g. https://home-assistant.example.com/
-        // which differs from the registered callback path, so full-path matching is too strict.
         const allClients = await env.DB.prepare('SELECT redirect_uris FROM clients WHERE is_active = 1').all<{ redirect_uris: string }>();
         const allAllowedUris = allClients.results.flatMap(c => {
           try { return JSON.parse(c.redirect_uris) as string[]; } catch { return []; }
@@ -444,7 +527,6 @@ export default {
         });
       }
 
-      // Returns which upstream providers are configured in env
       if (apiPath === '/api/providers' && request.method === 'GET') {
         const configured = [
           { id: 'google',    label: 'Google',    ready: !!(env.UPSTREAM_GOOGLE_CLIENT_ID    && env.UPSTREAM_GOOGLE_CLIENT_SECRET) },
@@ -458,7 +540,6 @@ export default {
       if (apiPath === '/api/clients' && request.method === 'POST') {
         const b = (await request.json()) as any;
 
-        // Basic input validation before touching D1
         if (!b.client_id || typeof b.client_id !== 'string' || !b.client_name || typeof b.client_name !== 'string') {
           return Response.json({ error: 'invalid_request', error_description: 'client_id and client_name are required strings' }, { status: 400 });
         }
@@ -466,10 +547,9 @@ export default {
           return Response.json({ error: 'invalid_request', error_description: 'redirect_uris must be a non-empty array' }, { status: 400 });
         }
 
-        // SECURITY: Enforce minimum secret length or auto-generate
         let finalSecret = (b.client_secret || '').trim();
         if (!finalSecret) {
-          finalSecret = generateSecureSecret(48); // Auto-generate if left blank
+          finalSecret = generateSecureSecret(48);
           console.log(`[SECURITY] Auto-generated 48-char secret for client: ${b.client_id}`);
         } else if (finalSecret.length < 32) {
           return Response.json({ 
@@ -490,11 +570,9 @@ export default {
         return Response.json({ success: true });
       }
 
-      // [INSERTION POINT B]: Save user mapping with composite (email, client_id) resolution
       if (apiPath === '/api/mappings' && request.method === 'POST') {
         const b = (await request.json()) as any;
 
-        // Basic input validation before touching D1
         if (!b.email || typeof b.email !== 'string') {
           return Response.json({ error: 'invalid_request', error_description: 'email is required' }, { status: 400 });
         }
@@ -524,7 +602,6 @@ export default {
         return Response.json({ success: true });
       }
 
-      // [INSERTION POINT C]: Delete user mapping scoped to (email, client_id)
       if (apiPath.startsWith('/api/mappings/') && request.method === 'DELETE') {
         const rawParam = decodeURIComponent(apiPath.replace('/api/mappings/', ''));
         const parts = rawParam.split('/');
