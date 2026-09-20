@@ -46,7 +46,7 @@ The broker never stores upstream provider tokens. It exchanges them immediately 
 | `GET /userinfo`                   | Userinfo endpoint                  |
 | `POST /revoke`                    | Token revocation (RFC 7009)        |
 | `GET /logout`                     | RP-initiated logout                |
-| `GET|POST <ADMIN_ROUTE_PATH>/*`   | Admin console (Zero Trust protected) |
+| `GET, POST /admin/*`              | Admin console (Zero Trust protected, path configurable) |
 
 ## 🚀 Setup
 
