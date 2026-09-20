@@ -1,0 +1,40 @@
+import { Env } from '../types';
+
+export function getOidcConfiguration(issuer: string) {
+  return {
+    issuer,
+    authorization_endpoint: `${issuer}/authorize`,
+    token_endpoint: `${issuer}/token`,
+    userinfo_endpoint: `${issuer}/userinfo`,
+    revocation_endpoint: `${issuer}/revoke`, // RFC 7009
+    jwks_uri: `${issuer}/.well-known/jwks.json`,
+    end_session_endpoint: `${issuer}/logout`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
+    token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic', 'none'],
+    subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'],
+    scopes_supported: ['openid', 'email', 'profile'],
+    claims_supported: ['sub', 'iss', 'aud', 'exp', 'iat', 'email', 'username', 'preferred_username', 'name'],
+    code_challenge_methods_supported: ['S256']
+  };
+}
+
+export function getJwks(env: Env): Response {
+  if (!env.BROKER_PUBLIC_KEY_JWK) {
+    return new Response(JSON.stringify({ error: 'BROKER_PUBLIC_KEY_JWK is not configured' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  try {
+    const publicJwk = JSON.parse(env.BROKER_PUBLIC_KEY_JWK);
+    return Response.json({ keys: [publicJwk] });
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: 'Failed to parse JWK', detail: err.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
