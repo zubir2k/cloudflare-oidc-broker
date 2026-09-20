@@ -192,6 +192,11 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
               <label for="clientRequirePkce" style="margin:0; font-weight:500;">Require PKCE (S256)</label>
               <span style="font-size:0.75rem; color:#888;">&mdash; uncheck for legacy clients (e.g. Synology)</span>
             </div>
+            <div style="display:flex; align-items:center; gap:0.5rem; padding-top:1.5rem;">
+              <input type="checkbox" id="clientActive" checked style="width:auto;margin:0;">
+              <label for="clientActive" style="margin:0; font-weight:500;">Active</label>
+              <span style="font-size:0.75rem; color:#888;">&mdash; uncheck to suspend this client without deleting it</span>
+            </div>
           </div>
           <div style="margin-top: 1rem;">
             <label>Authorized Redirect URIs (Comma separated)</label>
@@ -250,6 +255,11 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
             <div>
               <label>Display Name</label>
               <input type="text" id="displayName" placeholder="e.g. John Doe">
+            </div>
+            <div style="display:flex; align-items:center; gap:0.5rem; padding-top:1.5rem;">
+              <input type="checkbox" id="mappingActive" checked style="width:auto;margin:0;">
+              <label for="mappingActive" style="margin:0; font-weight:500;">Active</label>
+              <span style="font-size:0.75rem; color:#888;">&mdash; uncheck to suspend this user without deleting</span>
             </div>
           </div>
           <div class="form-actions">
@@ -382,6 +392,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
       document.getElementById('clientUris').value = (c.redirect_uris || []).join(', ');
       document.getElementById('clientProvider').value = c.provider || 'google';
       document.getElementById('clientRequirePkce').checked = c.require_pkce !== 0;
+      document.getElementById('clientActive').checked = c.is_active !== 0;
 
       document.getElementById('clientFormTitle').innerText = 'Edit Application: ' + c.client_id;
       document.getElementById('clientSubmitBtn').innerText = 'Update Application';
@@ -394,6 +405,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
       document.getElementById('clientId').disabled = false;
       document.getElementById('clientProvider').value = 'google';
       document.getElementById('clientRequirePkce').checked = true;
+      document.getElementById('clientActive').checked = true;
       document.getElementById('clientFormTitle').innerText = 'Register Downstream Client Application';
       document.getElementById('clientSubmitBtn').innerText = 'Save Client Application';
       document.getElementById('clientCancelBtn').style.display = 'none';
@@ -409,7 +421,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
         provider: document.getElementById('clientProvider').value,
         require_pkce: document.getElementById('clientRequirePkce').checked ? 1 : 0,
         redirect_uris: uris,
-        is_active: 1
+        is_active: document.getElementById('clientActive').checked ? 1 : 0
       };
       const res = await fetch(BASE_API + '/clients', {
         method: 'POST',
@@ -438,6 +450,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
       originalEditScope = m.client_id || '*';
       document.getElementById('targetUsername').value = m.username;
       document.getElementById('displayName').value = m.display_name || '';
+      document.getElementById('mappingActive').checked = m.is_active !== 0;
 
       document.getElementById('mappingFormTitle').innerText = 'Edit Mapping for ' + m.email;
       document.getElementById('mappingSubmitBtn').innerText = 'Update User Mapping';
@@ -463,7 +476,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
         original_client_id: originalEditScope,
         username: document.getElementById('targetUsername').value.trim(),
         display_name: document.getElementById('displayName').value.trim(),
-        is_active: 1
+        is_active: document.getElementById('mappingActive').checked ? 1 : 0
       };
       const res = await fetch(BASE_API + '/mappings', {
         method: 'POST',
