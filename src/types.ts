@@ -60,6 +60,8 @@ export interface BrokerSession {
   requirePkce: boolean;
   codeChallenge?: string;
   codeChallengeMethod?: string;
+  responseMode: 'query' | 'form_post';
+  authTime?: number; // Added for prompt=none compliance
 }
 
 export interface DownstreamAuthCode {
@@ -73,4 +75,5 @@ export interface DownstreamAuthCode {
   requirePkce: boolean;
   codeChallenge?: string;
   codeChallengeMethod?: string;
+  authTime?: number; // Added for prompt=none compliance
 }

@@ -16,7 +16,8 @@ export function getOidcConfiguration(issuer: string) {
     id_token_signing_alg_values_supported: ['RS256'],
     scopes_supported: ['openid', 'email', 'profile'],
     claims_supported: ['sub', 'iss', 'aud', 'exp', 'iat', 'email', 'username', 'preferred_username', 'name'],
-    code_challenge_methods_supported: ['S256']
+    code_challenge_methods_supported: ['S256'],
+    request_parameter_supported: true
   };
 }
 

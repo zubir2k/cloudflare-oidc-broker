@@ -72,8 +72,34 @@ export default {
     // 3. Downstream Authorization -> Redirect to Upstream Provider
     // -------------------------------------------------------------
     if (pathname === '/authorize') {
+      // 1. Parse Request Object (OIDC Core Request Object support)
+      const requestParam = url.searchParams.get('request');
+      let requestClaims: any = {};
+      if (requestParam) {
+        try {
+          const parts = requestParam.split('.');
+          if (parts.length === 3) {
+            // Base64url decode the payload (parts[1])
+            const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            const pad = base64.length % 4;
+            const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
+            const binary = atob(padded);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            requestClaims = JSON.parse(new TextDecoder().decode(bytes));
+          }
+        } catch (e) {
+          // Invalid request object, ignore and let standard validation handle it
+        }
+      }
+
+      // Helper: Request object claims take precedence over URL query parameters
+      const getParam = (key: string) => requestClaims[key] !== undefined ? requestClaims[key] : url.searchParams.get(key);
+
       // Strict response_type validation (OIDC Basic OP requirement)
-      const responseType = url.searchParams.get('response_type');
+      const responseType = getParam('response_type');
       if (responseType !== 'code') {
         return Response.json({ 
           error: 'unsupported_response_type', 
@@ -81,12 +107,16 @@ export default {
         }, { status: 400 });
       }
 
-      const clientId = url.searchParams.get('client_id');
-      const redirectUri = url.searchParams.get('redirect_uri');
-      const state = url.searchParams.get('state') || '';
-      const nonce = url.searchParams.get('nonce') || '';
-      const codeChallenge = url.searchParams.get('code_challenge') || '';
-      const codeChallengeMethod = url.searchParams.get('code_challenge_method') || '';
+      const clientId = getParam('client_id');
+      const redirectUri = getParam('redirect_uri');
+      const state = getParam('state') || '';
+      const nonce = getParam('nonce') || '';
+      const codeChallenge = getParam('code_challenge') || '';
+      const codeChallengeMethod = getParam('code_challenge_method') || '';
+      const prompt = getParam('prompt');
+      const maxAgeStr = getParam('max_age');
+      const maxAge = maxAgeStr ? parseInt(maxAgeStr, 10) : undefined;
+      const responseMode = (getParam('response_mode') || 'query') as 'query' | 'form_post';
 
       if (!clientId || !redirectUri) {
         return Response.json({ 
@@ -114,6 +144,57 @@ export default {
         }, { status: 400 });
       }
 
+      let sessionAuthTime: number | undefined = undefined;
+      let isLoggedIn = false;
+
+      const cookies = request.headers.get('Cookie') || '';
+      const sessionMatch = cookies.match(/user_session=([^;]+)/);
+      if (sessionMatch) {
+        try {
+          const cookieData = JSON.parse(decodeURIComponent(sessionMatch[1]));
+          const currentTime = Math.floor(Date.now() / 1000);
+          
+          const isMaxAgeSatisfied = maxAge !== undefined && (currentTime - cookieData.authTime) < maxAge;
+          const hasAnySession = cookieData.authTime !== undefined;
+
+          if (prompt === 'none') {
+            if (maxAge !== undefined) {
+              if (isMaxAgeSatisfied) {
+                sessionAuthTime = cookieData.authTime;
+                isLoggedIn = true;
+              } else {
+                // max_age expired, cannot do silent auth
+                isLoggedIn = false;
+              }
+            } else {
+              // No max_age, just check if any session exists
+              if (hasAnySession) {
+                sessionAuthTime = cookieData.authTime;
+                isLoggedIn = true;
+              } else {
+                isLoggedIn = false;
+              }
+            }
+          } else {
+            // Not prompt=none, but max_age is specified
+            if (isMaxAgeSatisfied) {
+              sessionAuthTime = cookieData.authTime;
+              isLoggedIn = true;
+            }
+          }
+        } catch (e) {
+          // Ignore cookie parse errors
+        }
+      }
+
+      if (prompt === 'none' && !isLoggedIn) {
+        const errorUrl = new URL(redirectUri);
+        errorUrl.searchParams.set('error', 'login_required');
+        errorUrl.searchParams.set('error_description', 'User is not authenticated or session expired for prompt=none');
+        if (state) errorUrl.searchParams.set('state', state);
+        return Response.redirect(errorUrl.toString(), 302);
+      }
+
       const requirePkce = client.require_pkce !== 0;
       if (requirePkce) {
         if (!codeChallenge || codeChallengeMethod !== 'S256') {
@@ -129,8 +210,26 @@ export default {
         }, { status: 400 });
       }
 
+      // Validate response_mode (OIDC Basic OP requirement)
+      if (responseMode !== 'query' && responseMode !== 'form_post') {
+        return Response.json({ 
+          error: 'invalid_request', 
+          error_description: 'Unsupported response_mode. Only query or form_post are supported.' 
+        }, { status: 400 });
+      }
+
       const brokerSessionId = crypto.randomUUID();
-      const sessionData: BrokerSession = { clientId, redirectUri, state, nonce, requirePkce, codeChallenge, codeChallengeMethod };
+      const sessionData: BrokerSession = { 
+        clientId, 
+        redirectUri, 
+        state, 
+        nonce, 
+        requirePkce, 
+        codeChallenge, 
+        codeChallengeMethod,
+        responseMode,
+        authTime: sessionAuthTime // Will be reused in /callback if valid
+      };
 
       await env.SESSIONS_KV.put(
         `session:${brokerSessionId}`,
@@ -235,6 +334,8 @@ export default {
         .bind(upstreamUser.sub, mappedUser.id)
         .run();
 
+      // Reuse authTime from session if it was validated in /authorize, otherwise generate new
+      const authTime = session.authTime || Math.floor(Date.now() / 1000);
       const brokerCode = crypto.randomUUID();
       const codePayload: DownstreamAuthCode = {
         clientId: session.clientId,
@@ -246,7 +347,8 @@ export default {
         nonce: session.nonce,
         requirePkce: session.requirePkce,
         codeChallenge: session.codeChallenge,
-        codeChallengeMethod: session.codeChallengeMethod
+        codeChallengeMethod: session.codeChallengeMethod,
+        authTime: authTime
       };
 
       await env.SESSIONS_KV.put(
@@ -255,11 +357,55 @@ export default {
         { expirationTtl: 120 }
       );
 
+      // Set a session cookie to remember the user is logged in (Required for prompt=none and max_age)
+      const sessionCookie = `user_session=${encodeURIComponent(JSON.stringify({
+        email: upstreamUser.email,
+        authTime: authTime
+      }))}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=3600`;
+
+      // Handle Form Post response mode for downstream client (OIDC Basic OP requirement)
+      if (session.responseMode === 'form_post') {
+        const escapeHtml = (str: string) => str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        
+        const html = `<!DOCTYPE html>
+<html>
+<head><title>Submitting...</title></head>
+<body onload="document.forms[0].submit()">
+  <noscript><p>Please click <button type="submit" form="redir-form">here</button> to continue.</p></noscript>
+  <form id="redir-form" method="POST" action="${escapeHtml(session.redirectUri)}">
+    <input type="hidden" name="code" value="${escapeHtml(brokerCode)}" />
+    <input type="hidden" name="state" value="${escapeHtml(session.state)}" />
+  </form>
+  <script>
+    setTimeout(() => { document.getElementById('redir-form').submit(); }, 100);
+  </script>
+</body>
+</html>`;
+
+        return new Response(html, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html',
+            'Cache-Control': 'no-store, no-cache, must-revalidate',
+            'Pragma': 'no-cache',
+            'Set-Cookie': sessionCookie
+          }
+        });
+      }
+
+      // Default: Standard 302 Redirect (Query mode)
       const targetUrl = new URL(session.redirectUri);
       targetUrl.searchParams.set('code', brokerCode);
       if (session.state) targetUrl.searchParams.set('state', session.state);
 
-      return Response.redirect(targetUrl.toString(), 302);
+      // ✅ Correct way to return a redirect with headers in Cloudflare Workers
+      return new Response(null, {
+        status: 302,
+        headers: {
+          'Location': targetUrl.toString(),
+          'Set-Cookie': sessionCookie
+        }
+      });
     }
 
     // -------------------------------------------------------------
@@ -361,6 +507,7 @@ export default {
         clientId: authData.clientId,
         issuer,
         nonce: authData.nonce,
+        authTime: authData.authTime,
         privateKeyJwk: env.BROKER_PRIVATE_KEY_JWK,
         publicKeyJwk: env.BROKER_PUBLIC_KEY_JWK
       });
