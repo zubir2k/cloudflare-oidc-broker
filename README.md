@@ -1,5 +1,10 @@
 # 🔐 Cloudflare OIDC Broker
 
+[![GitHub Repo stars](https://img.shields.io/github/stars/zubir2k/cloudflare-oidc-broker?style=social)](https://github.com/zubir2k/cloudflare-oidc-broker/stargazers)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-orange)](https://workers.cloudflare.com/)
+[![OIDC Basic OP Compliant](https://img.shields.io/badge/OIDC-Basic%20OP%20Compliant-success)](https://www.certification.openid.net/plan-detail.html?plan=wCGJeSQHOEVT2)
+[![Buy](https://img.shields.io/badge/Belanja-Coffee-yellow.svg)](https://zubirco.de/buymecoffee)
+
 A serverless, edge-deployed OpenID Connect (OIDC) broker built on **Cloudflare Workers**. 
 Federate social logins (Google, GitHub, Microsoft, Apple) and issue standard OIDC tokens 
 to your self-hosted apps — with zero infrastructure to manage.
@@ -167,6 +172,11 @@ wrangler.toml.example     # Configuration template
 - Synology DSM (OIDC SSO)
 - WordPress
 - Nextcloud
+
+## ✅ OpenID Connect Conformance
+
+This broker has been tested against the official **OpenID Foundation Conformance Suite** and passes all tests for the **Basic OP** profile. 
+- **Test Results:** [View Public Test Logs](https://www.certification.openid.net/plan-detail.html?plan=wCGJeSQHOEVT2)
 
 ## 🤝 Contributing & Security
 
