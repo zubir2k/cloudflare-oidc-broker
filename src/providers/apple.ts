@@ -1,16 +1,15 @@
+import { SignJWT, jwtVerify, createRemoteJWKSet } from 'jose';
 import { UpstreamProvider, UpstreamUser } from './types';
-import { importJWK, jwtVerify, createRemoteJWKSet } from 'jose';
-import { SignJWT } from 'jose';
 
 // Apple Sign In quirks:
-// 1. No userinfo endpoint — user claims are inside the id_token JWT
+// 1. No userinfo endpoint â€” user claims are inside the id_token JWT
 // 2. Client secret must be a signed JWT (not a static string)
-// 3. Apple only sends name/email in the FIRST login — store them on first use
-// 4. UPSTREAM_PROVIDER_TEAM_ID and UPSTREAM_PROVIDER_KEY_ID are required extras
+// 3. Apple only sends name/email in the FIRST login â€” store them on first use
+// 4. UPSTREAM_APPLE_TEAM_ID and UPSTREAM_APPLE_KEY_ID are required extras
 //
-// UPSTREAM_CLIENT_SECRET for Apple = the PEM private key (.p8 file content)
-// UPSTREAM_PROVIDER_TEAM_ID = your Apple Developer Team ID
-// UPSTREAM_PROVIDER_KEY_ID  = the Key ID of your Sign in with Apple private key
+// UPSTREAM_APPLE_CLIENT_SECRET = the PEM private key (.p8 file content)
+// UPSTREAM_APPLE_TEAM_ID       = your Apple Developer Team ID
+// UPSTREAM_APPLE_KEY_ID        = the Key ID of your Sign in with Apple private key
 
 export class AppleProvider implements UpstreamProvider {
   readonly name = 'apple';
@@ -33,23 +32,26 @@ export class AppleProvider implements UpstreamProvider {
     return url.toString();
   }
 
-  // Build a signed JWT to use as the Apple client_secret (valid for up to 6 months)
+  // Build a signed JWT to use as the Apple client_secret (valid for up to 6 months).
   private async buildClientSecret(clientId: string, pemKey: string): Promise<string> {
-    const cleanedPem = pemKey.replace(/-----BEGIN PRIVATE KEY-----/, '')
+    const cleanedPem = pemKey
+      .replace(/-----BEGIN PRIVATE KEY-----/, '')
       .replace(/-----END PRIVATE KEY-----/, '')
       .replace(/\s/g, '');
     const keyBytes = Uint8Array.from(atob(cleanedPem), c => c.charCodeAt(0));
     const privateKey = await crypto.subtle.importKey(
-      'pkcs8', keyBytes.buffer,
+      'pkcs8',
+      keyBytes.buffer,
       { name: 'ECDSA', namedCurve: 'P-256' },
-      false, ['sign']
+      false,
+      ['sign']
     );
     const now = Math.floor(Date.now() / 1000);
     return new SignJWT({})
       .setProtectedHeader({ alg: 'ES256', kid: this.keyId })
       .setIssuer(this.teamId)
       .setIssuedAt(now)
-      .setExpirationTime(now + 300) // 5 minutes is enough for a token exchange
+      .setExpirationTime(now + 300) // 5 minutes is sufficient for a token exchange
       .setAudience('https://appleid.apple.com')
       .setSubject(clientId)
       .sign(privateKey);
@@ -74,7 +76,7 @@ export class AppleProvider implements UpstreamProvider {
     if (!tokenResp.ok) throw new Error(`Apple token exchange failed: ${tokenResp.status}`);
     const { id_token } = await tokenResp.json() as { id_token: string };
 
-    // Verify and decode the id_token — Apple's JWKS endpoint is the source of truth
+    // Verify and decode the id_token â€” Apple's JWKS endpoint is the source of truth.
     const JWKS = createRemoteJWKSet(new URL('https://appleid.apple.com/auth/keys'));
     const { payload } = await jwtVerify(id_token, JWKS, {
       issuer: 'https://appleid.apple.com',
@@ -82,7 +84,7 @@ export class AppleProvider implements UpstreamProvider {
     });
 
     const email = (payload.email as string | undefined)?.toLowerCase();
-    if (!email) throw new Error('Apple: no email in id_token — ensure email scope was granted');
+    if (!email) throw new Error('Apple: no email in id_token â€” ensure email scope was granted');
 
     return {
       sub: payload.sub as string,

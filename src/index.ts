@@ -6,13 +6,16 @@ import { verifyPkce } from './utils/pkce';
 import { mintDownstreamIdToken } from './utils/jwt';
 import { verifyCloudflareAccess } from './utils/access';
 import { renderAdminConsoleHtml } from './views/adminConsole';
+import { parseClientCredentials } from './utils/clientAuth';
+import { parseRequestObjectClaims } from './utils/requestObject';
+import { renderFormPostHtml, renderFormPostErrorHtml } from './views/formPost';
 
 // Server-side secure secret generator fallback
 function generateSecureSecret(length = 48): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
   const randomValues = new Uint8Array(length);
   crypto.getRandomValues(randomValues);
-  
+
   let secret = '';
   for (let i = 0; i < length; i++) {
     secret += chars[randomValues[i] % chars.length];
@@ -20,7 +23,7 @@ function generateSecureSecret(length = 48): string {
   return secret;
 }
 
-// Helper function to inject CORS headers for OIDC API endpoints
+// Inject CORS headers for OIDC API endpoints
 function addCorsHeaders(response: Response): Response {
   response.headers.set('Access-Control-Allow-Origin', '*');
   response.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -65,45 +68,26 @@ export default {
     // 2. JWKS Public Keys
     // -------------------------------------------------------------
     if (pathname === '/.well-known/jwks.json') {
-      return getJwks(env);
+      return await getJwks(env);
     }
 
     // -------------------------------------------------------------
     // 3. Downstream Authorization -> Redirect to Upstream Provider
     // -------------------------------------------------------------
     if (pathname === '/authorize') {
-      // 1. Parse Request Object (OIDC Core Request Object support)
+      // Parse Request Object (OIDC Core §6 — request parameter)
       const requestParam = url.searchParams.get('request');
-      let requestClaims: any = {};
-      if (requestParam) {
-        try {
-          const parts = requestParam.split('.');
-          if (parts.length === 3) {
-            // Base64url decode the payload (parts[1])
-            const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-            const pad = base64.length % 4;
-            const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
-            const binary = atob(padded);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-              bytes[i] = binary.charCodeAt(i);
-            }
-            requestClaims = JSON.parse(new TextDecoder().decode(bytes));
-          }
-        } catch (e) {
-          // Invalid request object, ignore and let standard validation handle it
-        }
-      }
+      const requestClaims = requestParam ? parseRequestObjectClaims(requestParam) : {};
 
-      // Helper: Request object claims take precedence over URL query parameters
+      // Request object claims take precedence over URL query parameters
       const getParam = (key: string) => requestClaims[key] !== undefined ? requestClaims[key] : url.searchParams.get(key);
 
       // Strict response_type validation (OIDC Basic OP requirement)
       const responseType = getParam('response_type');
       if (responseType !== 'code') {
-        return Response.json({ 
-          error: 'unsupported_response_type', 
-          error_description: 'Only authorization code flow (response_type=code) is supported.' 
+        return Response.json({
+          error: 'unsupported_response_type',
+          error_description: 'Only authorization code flow (response_type=code) is supported.'
         }, { status: 400 });
       }
 
@@ -119,9 +103,9 @@ export default {
       const responseMode = (getParam('response_mode') || 'query') as 'query' | 'form_post';
 
       if (!clientId || !redirectUri) {
-        return Response.json({ 
-          error: 'invalid_request', 
-          error_description: 'Missing client_id or redirect_uri' 
+        return Response.json({
+          error: 'invalid_request',
+          error_description: 'Missing client_id or redirect_uri'
         }, { status: 400 });
       }
 
@@ -130,22 +114,30 @@ export default {
         .first<ClientRecord>();
 
       if (!client) {
-        return Response.json({ 
-          error: 'unauthorized_client', 
-          error_description: 'Unauthorized or inactive client_id' 
+        return Response.json({
+          error: 'unauthorized_client',
+          error_description: 'Unauthorized or inactive client_id'
         }, { status: 403 });
       }
 
       const allowedUris: string[] = JSON.parse(client.redirect_uris || '[]');
       if (!allowedUris.includes(redirectUri)) {
-        return Response.json({ 
-          error: 'invalid_request', 
-          error_description: 'Unauthorized redirect_uri' 
+        return Response.json({
+          error: 'invalid_request',
+          error_description: 'Unauthorized redirect_uri'
         }, { status: 400 });
       }
 
+      // ── Session / prompt handling ──────────────────────────────
+      //
+      // We only honour an existing session cookie to:
+      //   a) satisfy prompt=none (return login_required if no valid session), or
+      //   b) carry forward auth_time when max_age is satisfied so the downstream
+      //      id_token reflects the original authentication time.
+      //
+      // In all other cases the user is sent to the upstream provider unconditionally.
+
       let sessionAuthTime: number | undefined = undefined;
-      let isLoggedIn = false;
 
       const cookies = request.headers.get('Cookie') || '';
       const sessionMatch = cookies.match(/user_session=([^;]+)/);
@@ -153,82 +145,74 @@ export default {
         try {
           const cookieData = JSON.parse(decodeURIComponent(sessionMatch[1]));
           const currentTime = Math.floor(Date.now() / 1000);
-          
-          const isMaxAgeSatisfied = maxAge !== undefined && (currentTime - cookieData.authTime) < maxAge;
-          const hasAnySession = cookieData.authTime !== undefined;
+          const cookieAuthTime: number | undefined = cookieData.authTime;
+          const hasSession = cookieAuthTime !== undefined;
+          const maxAgeSatisfied = maxAge !== undefined && hasSession && (currentTime - cookieAuthTime!) < maxAge;
 
           if (prompt === 'none') {
-            if (maxAge !== undefined) {
-              if (isMaxAgeSatisfied) {
-                sessionAuthTime = cookieData.authTime;
-                isLoggedIn = true;
-              } else {
-                // max_age expired, cannot do silent auth
-                isLoggedIn = false;
-              }
-            } else {
-              // No max_age, just check if any session exists
-              if (hasAnySession) {
-                sessionAuthTime = cookieData.authTime;
-                isLoggedIn = true;
-              } else {
-                isLoggedIn = false;
-              }
+            // For prompt=none, decide immediately whether the session is acceptable.
+            const sessionAccepted = maxAge !== undefined ? maxAgeSatisfied : hasSession;
+            if (!sessionAccepted) {
+              const errorUrl = new URL(redirectUri);
+              errorUrl.searchParams.set('error', 'login_required');
+              errorUrl.searchParams.set('error_description', 'User is not authenticated or session has expired');
+              if (state) errorUrl.searchParams.set('state', state);
+              return Response.redirect(errorUrl.toString(), 302);
             }
-          } else {
-            // Not prompt=none, but max_age is specified
-            if (isMaxAgeSatisfied) {
-              sessionAuthTime = cookieData.authTime;
-              isLoggedIn = true;
-            }
+            sessionAuthTime = cookieAuthTime;
+          } else if (maxAgeSatisfied) {
+            // Non-none prompt: carry the original auth_time forward when max_age is met,
+            // so the downstream id_token reflects when the user actually authenticated.
+            sessionAuthTime = cookieAuthTime;
           }
-        } catch (e) {
-          // Ignore cookie parse errors
+          // Otherwise, sessionAuthTime stays undefined and will be set after the upstream login.
+        } catch {
+          // Ignore cookie parse errors — treat as no session
         }
-      }
-
-      if (prompt === 'none' && !isLoggedIn) {
+      } else if (prompt === 'none') {
+        // No cookie at all and prompt=none → must return login_required immediately
         const errorUrl = new URL(redirectUri);
         errorUrl.searchParams.set('error', 'login_required');
-        errorUrl.searchParams.set('error_description', 'User is not authenticated or session expired for prompt=none');
+        errorUrl.searchParams.set('error_description', 'User is not authenticated');
         if (state) errorUrl.searchParams.set('state', state);
         return Response.redirect(errorUrl.toString(), 302);
       }
 
+      // ── PKCE validation ────────────────────────────────────────
       const requirePkce = client.require_pkce !== 0;
       if (requirePkce) {
         if (!codeChallenge || codeChallengeMethod !== 'S256') {
-          return Response.json({ 
-            error: 'invalid_request', 
-            error_description: 'code_challenge and code_challenge_method=S256 are required' 
+          return Response.json({
+            error: 'invalid_request',
+            error_description: 'code_challenge and code_challenge_method=S256 are required'
           }, { status: 400 });
         }
       } else if (codeChallengeMethod && codeChallengeMethod !== 'S256') {
-        return Response.json({ 
-          error: 'invalid_request', 
-          error_description: 'Only S256 is supported for code_challenge_method' 
+        return Response.json({
+          error: 'invalid_request',
+          error_description: 'Only S256 is supported for code_challenge_method'
         }, { status: 400 });
       }
 
-      // Validate response_mode (OIDC Basic OP requirement)
+      // Validate response_mode
       if (responseMode !== 'query' && responseMode !== 'form_post') {
-        return Response.json({ 
-          error: 'invalid_request', 
-          error_description: 'Unsupported response_mode. Only query or form_post are supported.' 
+        return Response.json({
+          error: 'invalid_request',
+          error_description: 'Unsupported response_mode. Only query or form_post are supported.'
         }, { status: 400 });
       }
 
       const brokerSessionId = crypto.randomUUID();
-      const sessionData: BrokerSession = { 
-        clientId, 
-        redirectUri, 
-        state, 
-        nonce, 
-        requirePkce, 
-        codeChallenge, 
+      const sessionData: BrokerSession = {
+        clientId,
+        redirectUri,
+        state,
+        nonce,
+        requirePkce,
+        codeChallenge,
         codeChallengeMethod,
         responseMode,
-        authTime: sessionAuthTime // Will be reused in /callback if valid
+        authTime: sessionAuthTime
       };
 
       await env.SESSIONS_KV.put(
@@ -264,17 +248,17 @@ export default {
       }
 
       if (!code || !brokerSessionId) {
-        return Response.json({ 
-          error: 'invalid_request', 
-          error_description: 'Invalid callback parameters' 
+        return Response.json({
+          error: 'invalid_request',
+          error_description: 'Invalid callback parameters'
         }, { status: 400 });
       }
 
       const sessionRaw = await env.SESSIONS_KV.get(`session:${brokerSessionId}`);
       if (!sessionRaw) {
-        return Response.json({ 
-          error: 'invalid_request', 
-          error_description: 'Session expired or invalid' 
+        return Response.json({
+          error: 'invalid_request',
+          error_description: 'Session expired or invalid'
         }, { status: 403 });
       }
       const session: BrokerSession = JSON.parse(sessionRaw);
@@ -284,9 +268,9 @@ export default {
         .bind(session.clientId)
         .first<{ provider: string }>();
       if (!sessionClient) {
-        return Response.json({ 
-          error: 'unauthorized_client', 
-          error_description: 'Client no longer active' 
+        return Response.json({
+          error: 'unauthorized_client',
+          error_description: 'Client no longer active'
         }, { status: 403 });
       }
 
@@ -302,17 +286,16 @@ export default {
         });
       } catch (err: any) {
         console.error('Upstream provider error:', err?.message);
-        return Response.json({ 
-          error: 'server_error', 
-          error_description: 'Upstream identity verification failed' 
+        return Response.json({
+          error: 'server_error',
+          error_description: 'Upstream identity verification failed'
         }, { status: 502 });
       }
 
-      // App-scoped mapping with fallback to global '*'
       const mappedUser = await env.DB.prepare(`
-        SELECT * FROM user_mappings 
-        WHERE email = ? 
-          AND is_active = 1 
+        SELECT * FROM user_mappings
+        WHERE email = ?
+          AND is_active = 1
           AND (client_id = ? OR client_id = '*')
         ORDER BY CASE WHEN client_id = ? THEN 0 ELSE 1 END
         LIMIT 1
@@ -321,20 +304,20 @@ export default {
         .first<UserMappingRecord>();
 
       if (!mappedUser) {
-        // No email leak - generic error message
-        return Response.json({ 
-          error: 'access_denied', 
-          error_description: 'User is not authorized for this application' 
+        return Response.json({
+          error: 'access_denied',
+          error_description: 'User is not authorized for this application'
         }, { status: 403 });
       }
 
+      // Record last login and store the upstream sub on first login.
+      // google_sub stores any upstream provider sub (named for backwards compatibility).
       await env.DB.prepare(
         'UPDATE user_mappings SET last_login = CURRENT_TIMESTAMP, google_sub = COALESCE(google_sub, ?) WHERE id = ?'
       )
         .bind(upstreamUser.sub, mappedUser.id)
         .run();
 
-      // Reuse authTime from session if it was validated in /authorize, otherwise generate new
       const authTime = session.authTime || Math.floor(Date.now() / 1000);
       const brokerCode = crypto.randomUUID();
       const codePayload: DownstreamAuthCode = {
@@ -348,7 +331,7 @@ export default {
         requirePkce: session.requirePkce,
         codeChallenge: session.codeChallenge,
         codeChallengeMethod: session.codeChallengeMethod,
-        authTime: authTime
+        authTime
       };
 
       await env.SESSIONS_KV.put(
@@ -357,32 +340,28 @@ export default {
         { expirationTtl: 120 }
       );
 
-      // Set a session cookie to remember the user is logged in (Required for prompt=none and max_age)
       const sessionCookie = `user_session=${encodeURIComponent(JSON.stringify({
         email: upstreamUser.email,
-        authTime: authTime
+        authTime
       }))}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=3600`;
 
-      // Handle Form Post response mode for downstream client (OIDC Basic OP requirement)
+      // Handle Form Post response mode
       if (session.responseMode === 'form_post') {
-        const escapeHtml = (str: string) => str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        
-        const html = `<!DOCTYPE html>
-<html>
-<head><title>Submitting...</title></head>
-<body onload="document.forms[0].submit()">
-  <noscript><p>Please click <button type="submit" form="redir-form">here</button> to continue.</p></noscript>
-  <form id="redir-form" method="POST" action="${escapeHtml(session.redirectUri)}">
-    <input type="hidden" name="code" value="${escapeHtml(brokerCode)}" />
-    <input type="hidden" name="state" value="${escapeHtml(session.state)}" />
-  </form>
-  <script>
-    setTimeout(() => { document.getElementById('redir-form').submit(); }, 100);
-  </script>
-</body>
-</html>`;
+        const error = url.searchParams.get('error');
+        if (error) {
+          const errorDescription = url.searchParams.get('error_description');
+          return new Response(renderFormPostErrorHtml(session.redirectUri, error, errorDescription, session.state), {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html',
+              'Cache-Control': 'no-store, no-cache, must-revalidate',
+              'Pragma': 'no-cache',
+              'Set-Cookie': sessionCookie
+            }
+          });
+        }
 
-        return new Response(html, {
+        return new Response(renderFormPostHtml(session.redirectUri, brokerCode, session.state), {
           status: 200,
           headers: {
             'Content-Type': 'text/html',
@@ -393,12 +372,11 @@ export default {
         });
       }
 
-      // Default: Standard 302 Redirect (Query mode)
+      // Default: Standard 302 Redirect (query mode)
       const targetUrl = new URL(session.redirectUri);
       targetUrl.searchParams.set('code', brokerCode);
       if (session.state) targetUrl.searchParams.set('state', session.state);
 
-      // ✅ Correct way to return a redirect with headers in Cloudflare Workers
       return new Response(null, {
         status: 302,
         headers: {
@@ -412,38 +390,12 @@ export default {
     // 5. Downstream Token Endpoint
     // -------------------------------------------------------------
     if (pathname === '/token' && request.method === 'POST') {
-      const contentType = request.headers.get('content-type') || '';
-      let code = '';
-      let clientId = '';
-      let clientSecret = '';
-      let codeVerifier = '';
-
-      if (contentType.includes('application/x-www-form-urlencoded')) {
-        const text = await request.text();
-        const params = new URLSearchParams(text);
-        code = params.get('code') || '';
-        clientId = params.get('client_id') || '';
-        clientSecret = params.get('client_secret') || '';
-        codeVerifier = params.get('code_verifier') || '';
-      } else {
-        const formData = await request.formData();
-        code = (formData.get('code') as string) || '';
-        clientId = (formData.get('client_id') as string) || '';
-        clientSecret = (formData.get('client_secret') as string) || '';
-        codeVerifier = (formData.get('code_verifier') as string) || '';
-      }
-
-      const authHeader = request.headers.get('authorization');
-      if (authHeader && authHeader.startsWith('Basic ')) {
-        const credentials = atob(authHeader.split(' ')[1]).split(':');
-        clientId = clientId || credentials[0];
-        clientSecret = clientSecret || credentials[1];
-      }
+      const { clientId, clientSecret, code, codeVerifier } = await parseClientCredentials(request);
 
       if (!code || !clientId) {
-        return addCorsHeaders(Response.json({ 
-          error: 'invalid_request', 
-          error_description: 'Missing code or client_id' 
+        return addCorsHeaders(Response.json({
+          error: 'invalid_request',
+          error_description: 'Missing code or client_id'
         }, { status: 400 }));
       }
 
@@ -452,48 +404,48 @@ export default {
         .first<ClientRecord>();
 
       if (!client) {
-        return addCorsHeaders(Response.json({ 
-          error: 'invalid_client', 
-          error_description: 'Client not found or inactive' 
+        return addCorsHeaders(Response.json({
+          error: 'invalid_client',
+          error_description: 'Client not found or inactive'
         }, { status: 401 }));
       }
 
       if (client.client_secret && client.client_secret !== clientSecret) {
-        return addCorsHeaders(Response.json({ 
-          error: 'invalid_client', 
-          error_description: 'Unauthorized client credentials' 
+        return addCorsHeaders(Response.json({
+          error: 'invalid_client',
+          error_description: 'Unauthorized client credentials'
         }, { status: 401 }));
       }
 
       const authDataRaw = await env.SESSIONS_KV.get(`code:${code}`);
       if (!authDataRaw) {
-        return addCorsHeaders(Response.json({ 
-          error: 'invalid_grant', 
-          error_description: 'Code expired or invalid' 
+        return addCorsHeaders(Response.json({
+          error: 'invalid_grant',
+          error_description: 'Code expired or invalid'
         }, { status: 400 }));
       }
       const authData: DownstreamAuthCode = JSON.parse(authDataRaw);
       await env.SESSIONS_KV.delete(`code:${code}`);
 
       if (authData.clientId !== clientId) {
-        return addCorsHeaders(Response.json({ 
-          error: 'invalid_grant', 
-          error_description: 'Client mismatch' 
+        return addCorsHeaders(Response.json({
+          error: 'invalid_grant',
+          error_description: 'Client mismatch'
         }, { status: 400 }));
       }
 
       if (authData.requirePkce) {
         if (!authData.codeChallenge || !codeVerifier) {
-          return addCorsHeaders(Response.json({ 
-            error: 'invalid_request', 
-            error_description: 'Missing code_challenge or code_verifier' 
+          return addCorsHeaders(Response.json({
+            error: 'invalid_request',
+            error_description: 'Missing code_challenge or code_verifier'
           }, { status: 400 }));
         }
         const isPkceValid = await verifyPkce(codeVerifier, authData.codeChallenge, authData.codeChallengeMethod || 'S256');
         if (!isPkceValid) {
-          return addCorsHeaders(Response.json({ 
-            error: 'invalid_grant', 
-            error_description: 'PKCE verification failed' 
+          return addCorsHeaders(Response.json({
+            error: 'invalid_grant',
+            error_description: 'PKCE verification failed'
           }, { status: 400 }));
         }
       }
@@ -508,8 +460,7 @@ export default {
         issuer,
         nonce: authData.nonce,
         authTime: authData.authTime,
-        privateKeyJwk: env.BROKER_PRIVATE_KEY_JWK,
-        publicKeyJwk: env.BROKER_PUBLIC_KEY_JWK
+        privateKeyJwk: env.BROKER_PRIVATE_KEY_JWK
       });
 
       const accessToken = crypto.randomUUID();
@@ -542,24 +493,18 @@ export default {
       const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
 
       if (!accessToken) {
-        return addCorsHeaders(Response.json({ 
-          error: 'unauthorized', 
-          error_description: 'Missing access token' 
-        }, {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' }
-        }));
+        return addCorsHeaders(Response.json({
+          error: 'unauthorized',
+          error_description: 'Missing access token'
+        }, { status: 401 }));
       }
 
       const cachedRaw = await env.SESSIONS_KV.get(`access_token:${accessToken}`);
       if (!cachedRaw) {
-        return addCorsHeaders(Response.json({ 
-          error: 'invalid_token', 
-          error_description: 'Token expired or invalid' 
-        }, {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' }
-        }));
+        return addCorsHeaders(Response.json({
+          error: 'invalid_token',
+          error_description: 'Token expired or invalid'
+        }, { status: 401 }));
       }
 
       const userData = JSON.parse(cachedRaw);
@@ -577,35 +522,12 @@ export default {
     // 7. Token Revocation Endpoint (RFC 7009)
     // -------------------------------------------------------------
     if (pathname === '/revoke' && request.method === 'POST') {
-      const contentType = request.headers.get('content-type') || '';
-      let token = '';
-      let clientId = '';
-      let clientSecret = '';
-
-      if (contentType.includes('application/x-www-form-urlencoded')) {
-        const text = await request.text();
-        const params = new URLSearchParams(text);
-        token = params.get('token') || '';
-        clientId = params.get('client_id') || '';
-        clientSecret = params.get('client_secret') || '';
-      } else {
-        const formData = await request.formData();
-        token = (formData.get('token') as string) || '';
-        clientId = (formData.get('client_id') as string) || '';
-        clientSecret = (formData.get('client_secret') as string) || '';
-      }
-
-      const authHeader = request.headers.get('authorization');
-      if (authHeader && authHeader.startsWith('Basic ')) {
-        const credentials = atob(authHeader.split(' ')[1]).split(':');
-        clientId = clientId || credentials[0];
-        clientSecret = clientSecret || credentials[1];
-      }
+      const { clientId, clientSecret, token } = await parseClientCredentials(request);
 
       if (!token) {
-        return addCorsHeaders(Response.json({ 
-          error: 'invalid_request', 
-          error_description: 'Missing token parameter' 
+        return addCorsHeaders(Response.json({
+          error: 'invalid_request',
+          error_description: 'Missing token parameter'
         }, { status: 400 }));
       }
 
@@ -615,9 +537,9 @@ export default {
           .first<ClientRecord>();
 
         if (!client || (client.client_secret && client.client_secret !== clientSecret)) {
-          return addCorsHeaders(Response.json({ 
-            error: 'invalid_client', 
-            error_description: 'Unauthorized client credentials' 
+          return addCorsHeaders(Response.json({
+            error: 'invalid_client',
+            error_description: 'Unauthorized client credentials'
           }, { status: 401 }));
         }
       }
@@ -655,12 +577,25 @@ export default {
     }
 
     // -------------------------------------------------------------
-    // 9. Zero Trust Protected Operations Console & APIs
+    // 9. Zero Trust Protected Admin Console & APIs
     // -------------------------------------------------------------
     if (pathname.startsWith(env.ADMIN_ROUTE_PATH)) {
-      const accessUser = await verifyCloudflareAccess(request, env);
-      if (!accessUser) {
-        return new Response('Unauthorized Access: Invalid or missing Cloudflare Access token.', { status: 401 });
+      // Defense-in-depth: require EITHER a valid Cloudflare Access session OR the Admin API Token
+      const cfAccessEmail = request.headers.get('Cf-Access-Authenticated-User-Email');
+      const authHeader = request.headers.get('Authorization');
+      const hasValidToken = !!(env.ADMIN_API_TOKEN && authHeader === `Bearer ${env.ADMIN_API_TOKEN}`);
+
+      if (!cfAccessEmail && !hasValidToken) {
+        return new Response('Unauthorized: Missing valid Cloudflare Access session or Admin API Token.', { status: 401 });
+      }
+
+      // Verify Cloudflare Access JWT to get the confirmed user email for the UI
+      let accessUserEmail = cfAccessEmail || 'admin';
+      if (cfAccessEmail) {
+        const accessUser = await verifyCloudflareAccess(request, env);
+        if (accessUser?.email) {
+          accessUserEmail = accessUser.email;
+        }
       }
 
       const apiPath = pathname.replace(env.ADMIN_ROUTE_PATH, '');
@@ -699,9 +634,9 @@ export default {
           finalSecret = generateSecureSecret(48);
           console.log(`[SECURITY] Auto-generated 48-char secret for client: ${b.client_id}`);
         } else if (finalSecret.length < 32) {
-          return Response.json({ 
-            error: 'invalid_request', 
-            error_description: 'Custom client_secret must be at least 32 characters long for security' 
+          return Response.json({
+            error: 'invalid_request',
+            error_description: 'Custom client_secret must be at least 32 characters long for security'
           }, { status: 400 });
         }
 
@@ -736,7 +671,7 @@ export default {
         }
 
         await env.DB.prepare(`
-          INSERT INTO user_mappings (email, client_id, username, display_name, is_active) 
+          INSERT INTO user_mappings (email, client_id, username, display_name, is_active)
           VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(email, client_id) DO UPDATE SET
             username = excluded.username,
@@ -762,7 +697,7 @@ export default {
         return Response.json({ success: true });
       }
 
-      return new Response(renderAdminConsoleHtml(accessUser.email, env.ADMIN_ROUTE_PATH), {
+      return new Response(renderAdminConsoleHtml(accessUserEmail, env.ADMIN_ROUTE_PATH), {
         headers: { 'Content-Type': 'text/html; charset=utf-8' }
       });
     }

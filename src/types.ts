@@ -23,10 +23,11 @@ export interface Env {
   // Admin console (Cloudflare Zero Trust)
   CF_ACCESS_TEAM_NAME: string;
   CF_ACCESS_AUD: string;
+  ADMIN_API_TOKEN?: string;
 
-  // Broker signing keys (RS256 JWK pair)
+  // Broker signing key (RS256 private JWK).
+  // The public key is derived from this at runtime — no separate public key secret needed.
   BROKER_PRIVATE_KEY_JWK: string;
-  BROKER_PUBLIC_KEY_JWK: string;
 }
 
 export interface ClientRecord {
@@ -44,7 +45,7 @@ export interface UserMappingRecord {
   id: number;
   email: string;
   client_id: string;
-  google_sub: string | null;           // stores any upstream sub, named for backwards compat
+  google_sub: string | null;           // stores any upstream provider sub (named for backwards compat)
   username: string;
   display_name: string | null;
   is_active: number;
@@ -61,7 +62,7 @@ export interface BrokerSession {
   codeChallenge?: string;
   codeChallengeMethod?: string;
   responseMode: 'query' | 'form_post';
-  authTime?: number; // Added for prompt=none compliance
+  authTime?: number;
 }
 
 export interface DownstreamAuthCode {
@@ -75,5 +76,5 @@ export interface DownstreamAuthCode {
   requirePkce: boolean;
   codeChallenge?: string;
   codeChallengeMethod?: string;
-  authTime?: number; // Added for prompt=none compliance
+  authTime?: number;
 }

@@ -9,16 +9,15 @@ interface MintTokenParams {
   clientId: string;
   issuer: string;
   nonce?: string;
-  authTime?: number; // Added for prompt=none compliance
+  authTime?: number;
   privateKeyJwk: string;
-  publicKeyJwk: string;
 }
 
 export async function mintDownstreamIdToken(params: MintTokenParams): Promise<string> {
   const privateKey = await importJWK(JSON.parse(params.privateKeyJwk), 'RS256');
-  const pubJwk = JSON.parse(params.publicKeyJwk);
+  const privateJwk = JSON.parse(params.privateKeyJwk);
   const now = Math.floor(Date.now() / 1000);
-  const tokenAuthTime = params.authTime || now; // Use stored authTime if available
+  const tokenAuthTime = params.authTime || now;
 
   return new SignJWT({
     sub: params.sub,
@@ -30,7 +29,7 @@ export async function mintDownstreamIdToken(params: MintTokenParams): Promise<st
     auth_time: tokenAuthTime,
     ...(params.nonce ? { nonce: params.nonce } : {})
   })
-    .setProtectedHeader({ alg: 'RS256', kid: pubJwk.kid })
+    .setProtectedHeader({ alg: 'RS256', kid: privateJwk.kid })
     .setIssuer(params.issuer)
     .setAudience(params.clientId)
     .setIssuedAt(now)

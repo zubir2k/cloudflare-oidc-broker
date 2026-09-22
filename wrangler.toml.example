@@ -3,8 +3,8 @@ main = "src/index.ts"
 compatibility_date = "2026-03-05"
 workers_dev = true
 
-# Replace these with your actual Cloudflare resource IDs after deployment
-# DO NOT commit real IDs or secrets to this file
+# Replace these with your actual Cloudflare resource IDs after deployment.
+# DO NOT commit real IDs or secrets to this file — keep wrangler.toml in .gitignore.
 
 # Persistent D1 database for client apps & user mappings
 [[d1_databases]]
@@ -24,28 +24,32 @@ ADMIN_ROUTE_PATH = "/console"
 CF_ACCESS_TEAM_NAME = "<YOUR_CF_ACCESS_TEAM_NAME>"
 CF_ACCESS_AUD       = "<YOUR_CF_ACCESS_APPLICATION_AUD>"
 
-# Per-provider OAuth credentials
+# Per-provider OAuth credentials.
 # Only configure the providers you intend to use.
-# Non-sensitive values go here; secrets go via: npx wrangler secret put <NAME>
+# Non-sensitive client IDs go here; secrets go via: npx wrangler secret put <NAME>
 
 # Google
 UPSTREAM_GOOGLE_CLIENT_ID = "<YOUR_GOOGLE_CLIENT_ID>"
-# Secret: UPSTREAM_GOOGLE_CLIENT_SECRET
+# Secret: npx wrangler secret put UPSTREAM_GOOGLE_CLIENT_SECRET
 
 # Microsoft (optional)
-# UPSTREAM_MICROSOFT_CLIENT_ID  = "<YOUR_MICROSOFT_CLIENT_ID>"
-# UPSTREAM_MICROSOFT_TENANT     = "common"   # or a specific tenant ID
-# Secret: UPSTREAM_MICROSOFT_CLIENT_SECRET
+# UPSTREAM_MICROSOFT_CLIENT_ID = "<YOUR_MICROSOFT_CLIENT_ID>"
+# UPSTREAM_MICROSOFT_TENANT    = "common"   # or a specific tenant ID
+# Secret: npx wrangler secret put UPSTREAM_MICROSOFT_CLIENT_SECRET
 
 # GitHub (optional)
 # UPSTREAM_GITHUB_CLIENT_ID = "<YOUR_GITHUB_CLIENT_ID>"
-# Secret: UPSTREAM_GITHUB_CLIENT_SECRET
+# Secret: npx wrangler secret put UPSTREAM_GITHUB_CLIENT_SECRET
 
 # Apple (optional)
-# UPSTREAM_APPLE_CLIENT_ID  = "<YOUR_APPLE_SERVICES_ID>"   # e.g. com.example.signin
-# UPSTREAM_APPLE_TEAM_ID    = "<YOUR_APPLE_TEAM_ID>"
-# UPSTREAM_APPLE_KEY_ID     = "<YOUR_APPLE_KEY_ID>"
-# Secret: UPSTREAM_APPLE_CLIENT_SECRET  <- .p8 PEM key file content
+# UPSTREAM_APPLE_CLIENT_ID = "<YOUR_APPLE_SERVICES_ID>"   # e.g. com.example.signin
+# UPSTREAM_APPLE_TEAM_ID   = "<YOUR_APPLE_TEAM_ID>"
+# UPSTREAM_APPLE_KEY_ID    = "<YOUR_APPLE_KEY_ID>"
+# Secret: npx wrangler secret put UPSTREAM_APPLE_CLIENT_SECRET  # .p8 PEM key content
 
-# Broker signing keys
-# Secrets: BROKER_PRIVATE_KEY_JWK, BROKER_PUBLIC_KEY_JWK
+# Broker signing key (RS256 private JWK).
+# The public key is automatically derived from this at runtime — no public key secret needed.
+# Secret: npx wrangler secret put BROKER_PRIVATE_KEY_JWK
+
+# Admin API token (optional — alternative auth for the admin console).
+# Secret: npx wrangler secret put ADMIN_API_TOKEN

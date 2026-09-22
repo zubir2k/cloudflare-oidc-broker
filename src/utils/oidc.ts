@@ -6,7 +6,7 @@ export function getOidcConfiguration(issuer: string) {
     authorization_endpoint: `${issuer}/authorize`,
     token_endpoint: `${issuer}/token`,
     userinfo_endpoint: `${issuer}/userinfo`,
-    revocation_endpoint: `${issuer}/revoke`, // RFC 7009
+    revocation_endpoint: `${issuer}/revoke`,
     jwks_uri: `${issuer}/.well-known/jwks.json`,
     end_session_endpoint: `${issuer}/logout`,
     response_types_supported: ['code'],
@@ -21,16 +21,29 @@ export function getOidcConfiguration(issuer: string) {
   };
 }
 
-export function getJwks(env: Env): Response {
-  if (!env.BROKER_PUBLIC_KEY_JWK) {
-    return new Response(JSON.stringify({ error: 'BROKER_PUBLIC_KEY_JWK is not configured' }), {
+export async function getJwks(env: Env): Promise<Response> {
+  if (!env.BROKER_PRIVATE_KEY_JWK) {
+    return new Response(JSON.stringify({ error: 'BROKER_PRIVATE_KEY_JWK is not configured' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
   try {
-    const publicJwk = JSON.parse(env.BROKER_PUBLIC_KEY_JWK);
+    // Parse the private JWK
+    const privateJwk = JSON.parse(env.BROKER_PRIVATE_KEY_JWK);
+
+    // Construct the public JWK using only the public components of the private key.
+    // This avoids the "non-extractable CryptoKey" error entirely.
+    const publicJwk = {
+      kty: privateJwk.kty,
+      use: 'sig',
+      alg: 'RS256',
+      kid: privateJwk.kid,
+      n:   privateJwk.n,
+      e:   privateJwk.e
+    };
+
     return Response.json({ keys: [publicJwk] });
   } catch (err: any) {
     return new Response(JSON.stringify({ error: 'Failed to parse JWK', detail: err.message }), {
