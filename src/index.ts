@@ -477,6 +477,14 @@ export default {
         { expirationTtl: 3600 }
       );
 
+      // Maintain a reverse index so /logout can purge all tokens for this user.
+      // user_tokens:{email} holds a JSON array of active access token UUIDs.
+      const userTokensKey = `user_tokens:${authData.email}`;
+      const existingIndexRaw = await env.SESSIONS_KV.get(userTokensKey);
+      const existingTokens: string[] = existingIndexRaw ? JSON.parse(existingIndexRaw) : [];
+      existingTokens.push(accessToken);
+      await env.SESSIONS_KV.put(userTokensKey, JSON.stringify(existingTokens), { expirationTtl: 3600 });
+
       return addCorsHeaders(Response.json({
         access_token: accessToken,
         token_type: 'Bearer',
@@ -553,6 +561,55 @@ export default {
     // -------------------------------------------------------------
     if (pathname === '/logout') {
       const postLogoutRedirectUri = url.searchParams.get('post_logout_redirect_uri');
+      const idTokenHint = url.searchParams.get('id_token_hint');
+
+      // Identify the user to purge tokens for.
+      // Prefer id_token_hint (OIDC spec, covers back-channel & RP-initiated logout).
+      // Fall back to the broker session cookie (browser-initiated logout without hint).
+      let logoutEmail: string | undefined;
+
+      if (idTokenHint) {
+        try {
+          // Decode without verification — this is our own token, we trust the payload shape.
+          // We only need the email claim to look up the reverse index.
+          const parts = idTokenHint.split('.');
+          if (parts.length === 3) {
+            const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+            logoutEmail = payload.email as string | undefined;
+          }
+        } catch {
+          // Malformed hint — ignore and proceed without purging
+        }
+      }
+
+      if (!logoutEmail) {
+        try {
+          const logoutCookies = request.headers.get('Cookie') || '';
+          const logoutSessionMatch = logoutCookies.match(/user_session=([^;]+)/);
+          if (logoutSessionMatch) {
+            const cookieData = JSON.parse(decodeURIComponent(logoutSessionMatch[1]));
+            logoutEmail = cookieData.email as string | undefined;
+          }
+        } catch {
+          // Ignore cookie parse errors
+        }
+      }
+
+      // Purge all active access tokens for the identified user
+      if (logoutEmail) {
+        const userTokensKey = `user_tokens:${logoutEmail}`;
+        const indexRaw = await env.SESSIONS_KV.get(userTokensKey);
+        if (indexRaw) {
+          const tokenIds: string[] = JSON.parse(indexRaw);
+          await Promise.all([
+            ...tokenIds.map(id => env.SESSIONS_KV.delete(`access_token:${id}`)),
+            env.SESSIONS_KV.delete(userTokensKey)
+          ]);
+        }
+      }
+
+      // Clear the broker session cookie regardless
+      const clearCookie = 'user_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0';
 
       if (postLogoutRedirectUri) {
         const allClients = await env.DB.prepare('SELECT redirect_uris FROM clients WHERE is_active = 1').all<{ redirect_uris: string }>();
@@ -568,11 +625,20 @@ export default {
           return new Response('Invalid post_logout_redirect_uri: not registered for any active client.', { status: 400 });
         }
 
-        return Response.redirect(postLogoutRedirectUri, 302);
+        return new Response(null, {
+          status: 302,
+          headers: {
+            'Location': postLogoutRedirectUri,
+            'Set-Cookie': clearCookie
+          }
+        });
       }
 
       return new Response('You have been logged out.', {
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Set-Cookie': clearCookie
+        }
       });
     }
 
