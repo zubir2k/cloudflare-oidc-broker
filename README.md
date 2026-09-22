@@ -9,6 +9,10 @@ A serverless, edge-deployed OpenID Connect (OIDC) broker built on **Cloudflare W
 Federate social logins (Google, GitHub, Microsoft, Apple) and issue standard OIDC tokens 
 to your self-hosted apps — with zero infrastructure to manage.
 
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zubir2k/cloudflare-oidc-broker)
+
+**Note:** After deploying, complete the [Setup Guide](#-setup) to configure your database, KV namespace, and secrets before the broker is functional.
+
 > **Disclaimer**: This is an independent, community-driven project and is not affiliated with, endorsed by, or sponsored by Cloudflare, Inc. Cloudflare is a trademark of Cloudflare, Inc.
 
 ## 🎯 Why This Exists
@@ -57,9 +61,9 @@ The broker never stores upstream provider tokens. It exchanges them immediately 
 
 ### 1. Prerequisites
 
+- OAuth 2.0 credentials from your chosen upstream providers (Google, GitHub, etc.)
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/) installed and authenticated
 - A Cloudflare account (free tier is sufficient)
-- OAuth 2.0 credentials from your chosen upstream providers (Google, GitHub, etc.)
 
 ### 2. Provider OAuth Credentials
 
@@ -115,7 +119,7 @@ const { webcrypto } = require('crypto');
 npx wrangler secret put UPSTREAM_GOOGLE_CLIENT_SECRET
 npx wrangler secret put UPSTREAM_GITHUB_CLIENT_SECRET
 npx wrangler secret put BROKER_PRIVATE_KEY_JWK
-npx wrangler secret put BROKER_PUBLIC_KEY_JWK
+npx wrangler secret put ADMIN_API_TOKEN  # (Optional but recommended) Defense-in-depth for admin routes
 ```
 
 ### 7. Deploy
@@ -131,6 +135,8 @@ In the Cloudflare dashboard, add a custom domain route for your Worker (e.g., `i
 ## 🛡️ Admin Console
 
 The admin console is protected by **Cloudflare Zero Trust Access**. Set `CF_ACCESS_TEAM_NAME` and `CF_ACCESS_AUD` in `wrangler.toml`, then configure an Access application pointing at `<your-domain><ADMIN_ROUTE_PATH>`.
+
+> **Defense-in-Depth:** For added security, you can set the `ADMIN_API_TOKEN` secret. The Worker will then require *either* a valid Cloudflare Access session *or* a valid `Authorization: Bearer <token>` header, protecting against Zero Trust misconfigurations.
 
 The console lets you:
 - Register and manage downstream client applications
@@ -151,7 +157,7 @@ A mapping scoped to a specific `client_id` takes precedence over the global one,
 
 ```text
 src/
-├── index.ts              # Main router and all OIDC endpoint handlers
+├── index.ts              # Main router and OIDC endpoint handlers
 ├── types.ts              # TypeScript interfaces (Env, DB models, OIDC schemas)
 ├── providers/            # Upstream provider implementations (Google, GitHub, etc.)
 ├── utils/
@@ -159,19 +165,29 @@ src/
 │   ├── pkce.ts           # RFC 7636 PKCE challenge verification
 │   ├── jwt.ts            # RS256 JWT minting via jose
 │   ├── access.ts         # Cloudflare Zero Trust JWT verification
-│   └── oidc.ts           # Discovery document and JWKS response
+│   ├── oidc.ts           # Discovery document and JWKS response
+│   ├── clientAuth.ts     # Secure client credential parsing (fixes colon-in-secret bug)
+│   └── requestObject.ts  # OIDC Request Object (JWT) parsing utility
 └── views/
-    └── adminConsole.ts   # Admin console HTML renderer
-schema.sql                # Fresh install schema (D1)
-wrangler.toml.example     # Configuration template
+    ├── adminConsole.ts   # Admin console HTML renderer
+    └── formPost.ts       # OIDC Form Post response mode HTML renderer
 ```
+
+## 🛡️ Security & Operational Best Practices
+
+While this broker is designed for simplicity, production deployments should follow these best practices:
+
+- **Rate Limiting:** Configure a Cloudflare WAF Rate Limiting rule for `/token` and `/authorize` (e.g., 10 requests per 10 seconds per IP) to prevent brute-force attacks.
+- **Database Backups:** Regularly export your D1 database (`npx wrangler d1 export oidc-broker-db --output=backup.sql`) to ensure you can recover from accidental schema changes or data loss.
+- **Key Rotation:** If your `BROKER_PRIVATE_KEY_JWK` is ever compromised, generate a new key pair, update the secret, and redeploy. Note that previously issued tokens will remain valid until their 1-hour expiration.
+- **Known Limitations:** Session revocation relies on Cloudflare KV eventual consistency. In rare edge cases, a revoked session may remain valid for up to 60 seconds at edge locations. Access tokens are stateless and cannot be revoked once issued.
 
 ## ✅ Tested With
 
-- Home Assistant (`homeassistant/generic_oauth2`)
+- Home Assistant ([cavefire/hass-openid](https://github.com/cavefire/hass-openid))
 - Synology DSM (OIDC SSO)
 - WordPress
-- Nextcloud
+- Proxmox VE
 
 ## ✅ OpenID Connect Conformance
 
