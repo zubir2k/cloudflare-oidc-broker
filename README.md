@@ -5,9 +5,9 @@
 [![OIDC Basic OP Compliant](https://img.shields.io/badge/OIDC-Basic%20OP%20Compliant-success)](https://www.certification.openid.net/plan-detail.html?plan=wCGJeSQHOEVT2)
 [![Buy](https://img.shields.io/badge/Belanja-Coffee-yellow.svg)](https://zubirco.de/buymecoffee)
 
-A serverless, edge-deployed OpenID Connect (OIDC) broker built on **Cloudflare Workers**. 
+A secure, serverless, edge-deployed OpenID Connect (OIDC) broker built on **Cloudflare Workers**. 
 Federate social logins (Google, GitHub, Microsoft, Apple) and issue standard OIDC tokens 
-to your self-hosted apps — with zero infrastructure to manage.
+to your self-hosted apps — with zero infrastructure to manage and enterprise-grade security.
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zubir2k/cloudflare-oidc-broker)
 
@@ -18,20 +18,39 @@ to your self-hosted apps — with zero infrastructure to manage.
 ## 🎯 Why This Exists
 
 - **Self-branded identity**: Your apps authenticate against `id.yourdomain.com`, not Google directly.
-- **Per-app user mapping**: Map Google accounts to different local usernames per application.
-- **Access control**: Allowlist exactly which Google accounts can log in, and to which apps.
+- **Per-app user mapping**: Map provider accounts to different local usernames per application.
+- **Access control**: Allowlist exactly which accounts can log in, and to which apps.
 - **Zero infrastructure**: Runs on Cloudflare Workers + D1 + KV, fitting entirely within the free tier.
-- **OAuth 2.1 compliant**: PKCE S256 enforced, authorization code flow only, no implicit flow.
+- **OAuth 2.1 aligned**: PKCE S256 enforced for *all* clients, authorization code flow only, no implicit flow.
+- **Cryptographic upstream validation**: Validates upstream ID tokens (checking `iss`, `aud`, `nonce`, `exp`) instead of blindly trusting `/userinfo` endpoints.
 
 ## 🏗️ Architecture
 
 ```text
-Browser ──> /authorize ──> Google OAuth ──> /callback ──> Downstream App
-                │                              │
-           KV (session)                  D1 (user mapping)
+Browser ──> /authorize ──> Upstream Provider ──> /callback ──> Downstream App
+                │                 (Validates ID Token)     │
+           KV (session)                       D1 (user mapping & sub hashing)
 ```
 
-The broker never stores upstream provider tokens. It exchanges them immediately for a broker-signed RS256 `id_token` issued under your own issuer URL.
+The broker never stores upstream provider tokens. It exchanges them immediately, cryptographically validates the upstream ID token, generates a deterministic hashed `sub` claim, and mints a broker-signed RS256 `id_token` issued under your own issuer URL.
+
+## 🔄 How It Works
+
+1. **Downstream Request:** A user attempts to log in to a downstream app (e.g., Home Assistant). The app redirects the user to the Broker's `/authorize` endpoint.
+2. **Upstream Authentication:** The broker generates a secure session and redirects the user to the configured upstream provider (e.g., Google).
+3. **Callback & Validation:** Upon successful upstream login, the provider redirects back to the broker's `/callback`. The broker cryptographically validates the upstream ID token and checks the user against the `user_mappings` database.
+4. **Token Issuance:** If authorized, the broker generates a deterministic `sub`, mints a signed downstream ID token, and redirects the user back to the downstream app with a secure authorization code.
+
+## 🆚 How This Compares to Cloudflare Access
+
+This broker is **not** a replacement for Cloudflare Zero Trust (Access). Instead, it is a specialized **Federated Identity Broker** designed to solve specific edge cases that generic Access policies cannot handle:
+
+- **Granular Per-App Mapping:** Unlike Access domain-wide policies, this broker uses a local database (`user_mappings`) to allow or deny specific users on a *per-application* basis (e.g., allow User A in Home Assistant, but deny them in Nextcloud).
+- **Subject (`sub`) Isolation:** Cloudflare Access issues a global User UUID. This broker generates a deterministic, SHA-256 hashed `sub` scoped to each downstream client, preventing cross-application user correlation and enhancing privacy.
+- **Identity Normalization:** It seamlessly aggregates multiple upstream providers (Google, Microsoft, GitHub) and normalizes their claims into a consistent format expected by downstream apps, regardless of the original provider's schema.
+- **Cost Efficiency:** It runs entirely on Cloudflare Workers, D1, and KV, avoiding the per-seat licensing costs associated with Cloudflare Zero Trust paid plans.
+
+*Note: This broker can be deployed alongside Cloudflare Access, using Access to protect the broker's own administrative endpoints or as one of the upstream identity providers.*
 
 ## 🧰 Stack
 
@@ -158,29 +177,38 @@ A mapping scoped to a specific `client_id` takes precedence over the global one,
 ```text
 src/
 ├── index.ts              # Main router and OIDC endpoint handlers
-├── types.ts              # TypeScript interfaces (Env, DB models, OIDC schemas)
-├── providers/            # Upstream provider implementations (Google, GitHub, etc.)
+├── types.ts              # Core TypeScript interfaces (Env, DB models, OIDC schemas)
+├── providers/            # Upstream provider implementations
+│   ├── types.ts          # Shared UpstreamProvider interface and user schemas
+│   ├── registry.ts       # Centralized provider registration and routing
+│   └── [google, microsoft, github, apple].ts
+|                         # Individual provider logic & JWKS validation
 ├── utils/
-│   ├── origin.ts         # Issuer and canonical URL resolution
+│   ├── origin.ts         # Issuer and canonical URL resolution (forces HTTPS)
 │   ├── pkce.ts           # RFC 7636 PKCE challenge verification
 │   ├── jwt.ts            # RS256 JWT minting via jose
 │   ├── access.ts         # Cloudflare Zero Trust JWT verification
 │   ├── oidc.ts           # Discovery document and JWKS response
-│   ├── clientAuth.ts     # Secure client credential parsing (fixes colon-in-secret bug)
-│   └── requestObject.ts  # OIDC Request Object (JWT) parsing utility
+│   ├── clientAuth.ts     # Secure client credential parsing (rejects mixed auth)
+│   └── subHash.ts        # Deterministic SHA-256 sub claim isolation
 └── views/
     ├── adminConsole.ts   # Admin console HTML renderer
-    └── formPost.ts       # OIDC Form Post response mode HTML renderer
+    ├── formPost.ts       # OIDC Form Post response mode HTML renderer
+    └── errorPage.ts      # Context-aware Access Denied page (popup/main window)
 ```
 
 ## 🛡️ Security & Operational Best Practices
 
-While this broker is designed for simplicity, production deployments should follow these best practices:
+This broker is designed with a "Zero Trust" approach to identity brokering. Production deployments benefit from these built-in and recommended practices:
 
-- **Rate Limiting:** Configure a Cloudflare WAF Rate Limiting rule for `/token` and `/authorize` (e.g., 10 requests per 10 seconds per IP) to prevent brute-force attacks.
-- **Database Backups:** Regularly export your D1 database (`npx wrangler d1 export oidc-broker-db --output=backup.sql`) to ensure you can recover from accidental schema changes or data loss.
-- **Key Rotation:** If your `BROKER_PRIVATE_KEY_JWK` is ever compromised, generate a new key pair, update the secret, and redeploy. Note that previously issued tokens will remain valid until their 1-hour expiration.
-- **Known Limitations:** Session revocation relies on Cloudflare KV eventual consistency. In rare edge cases, a revoked session may remain valid for up to 60 seconds at edge locations. Access tokens are stateless and cannot be revoked once issued.
+- **Strict Transport Security**: Enforces global `Strict-Transport-Security`, `X-Content-Type-Options`, and `Referrer-Policy` headers on all responses.
+- **Cache Prevention**: Applies `Cache-Control: no-store` to `/token` and `/userinfo` endpoints per RFC 6749.
+- **Locked-Down CORS**: Removed wide-open `Access-Control-Allow-Origin: *` from backend-to-backend token exchanges to prevent cross-origin abuse.
+- **Mixed Auth Rejection**: Strictly enforces RFC 6749 §2.3 by rejecting clients that attempt to use both Basic Auth and body credentials simultaneously.
+- **Adaptive Error Handling**: Features a context-aware "Access Denied" page that gracefully handles popup and main-window flows, bypassing non-compliant downstream clients (like Synology DSM and Home Assistant) that fail to process standard OAuth error redirects.
+- **Rate Limiting (Recommended)**: Configure a Cloudflare WAF Rate Limiting rule for `/token` and `/authorize` (e.g., 10 requests per 10 seconds per IP) to prevent brute-force attacks.
+- **Database Backups (Recommended)**: Regularly export your D1 database (`npx wrangler d1 export oidc-broker-db --output=backup.sql`) to ensure you can recover from accidental schema changes or data loss.
+- **Key Rotation (Recommended)**: If your `BROKER_PRIVATE_KEY_JWK` is ever compromised, generate a new key pair, update the secret, and redeploy. Note that previously issued tokens will remain valid until their 1-hour expiration.
 
 ## ✅ Tested With
 
