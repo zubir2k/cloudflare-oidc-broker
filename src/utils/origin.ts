@@ -1,7 +1,18 @@
+// src/utils/origin.ts
+
+/**
+ * Resolves the canonical issuer URL for the OIDC broker.
+ * 
+ * Cloudflare Workers often receive requests internally over HTTP.
+ * We explicitly force the protocol to HTTPS to ensure upstream providers
+ * (like Google) and downstream clients (like Home Assistant) always
+ * receive secure endpoints.
+ */
 export function getIssuer(request: Request): string {
   const url = new URL(request.url);
-  // Respect reverse proxy or Cloudflare forwarding headers if present
-  const proto = request.headers.get('x-forwarded-proto') || url.protocol.replace(':', '');
-  const host = request.headers.get('x-forwarded-host') || url.host;
-  return `${proto}://${host}`;
+  
+  // Force HTTPS protocol
+  url.protocol = 'https:';
+  
+  return url.origin; // Returns 'https://id.zubir.tech'
 }

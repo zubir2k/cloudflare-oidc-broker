@@ -1,4 +1,10 @@
 import { UpstreamProvider, UpstreamUser } from './types';
+import { register } from './registry';
+
+export interface GitHubEnv {
+  UPSTREAM_GITHUB_CLIENT_ID?: string;
+  UPSTREAM_GITHUB_CLIENT_SECRET?: string;
+}
 
 // GitHub is OAuth2 only (not OIDC). Email requires a separate API call
 // because GitHub users can hide their email from the basic /user endpoint.
@@ -17,7 +23,6 @@ export class GitHubProvider implements UpstreamProvider {
   async exchangeCode({ code, clientId, clientSecret, redirectUri }: {
     code: string; clientId: string; clientSecret: string; redirectUri: string;
   }): Promise<UpstreamUser> {
-    // Step 1: exchange code for access token
     const tokenResp = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
@@ -28,28 +33,36 @@ export class GitHubProvider implements UpstreamProvider {
 
     const headers = { Authorization: `Bearer ${access_token}`, Accept: 'application/json', 'User-Agent': 'cloudflare-oidc-broker' };
 
-    // Step 2: get user profile (id, login, name)
     const userResp = await fetch('https://api.github.com/user', { headers });
     if (!userResp.ok) throw new Error(`GitHub user fetch failed: ${userResp.status}`);
-    const u = await userResp.json() as { id: number; login: string; name?: string; email?: string };
+    const u = await userResp.json() as { id: number; login: string; name?: string };
 
-    // Step 3: get verified primary email (may not be in /user if user hid it)
-    let email = u.email?.toLowerCase() || '';
-    if (!email) {
-      const emailsResp = await fetch('https://api.github.com/user/emails', { headers });
-      if (emailsResp.ok) {
-        const emails = await emailsResp.json() as { email: string; primary: boolean; verified: boolean }[];
-        const primary = emails.find(e => e.primary && e.verified);
-        email = primary?.email.toLowerCase() || '';
-      }
-    }
-    if (!email) throw new Error('GitHub: no verified primary email found');
+    // Always fetch /user/emails — never trust u.email from /user (unverified public profile field).
+    const emailsResp = await fetch('https://api.github.com/user/emails', { headers });
+    if (!emailsResp.ok) throw new Error(`GitHub emails fetch failed: ${emailsResp.status}`);
+    const emails = await emailsResp.json() as { email: string; primary: boolean; verified: boolean }[];
+    const primaryVerified = emails.find(e => e.primary === true && e.verified === true);
+    if (!primaryVerified) throw new Error('GitHub: no verified primary email found');
 
     return {
-      sub: `github:${u.id}`,   // Namespace to avoid collision with other providers
-      email,
-      email_verified: true,     // GitHub only returns verified emails
+      sub: `github:${u.id}`,
+      email: primaryVerified.email.toLowerCase(),
+      email_verified: true,
       name: u.name || u.login
     };
   }
 }
+
+register('github', {
+  label: 'GitHub',
+  isReady: (env: any) => !!(env.UPSTREAM_GITHUB_CLIENT_ID && env.UPSTREAM_GITHUB_CLIENT_SECRET),
+  create: (env: any) => {
+    if (!env.UPSTREAM_GITHUB_CLIENT_ID || !env.UPSTREAM_GITHUB_CLIENT_SECRET)
+      throw new Error('GitHub provider requires UPSTREAM_GITHUB_CLIENT_ID and UPSTREAM_GITHUB_CLIENT_SECRET');
+    return new GitHubProvider();
+  },
+  credentials: (env: any) => ({
+    clientId: env.UPSTREAM_GITHUB_CLIENT_ID!,
+    clientSecret: env.UPSTREAM_GITHUB_CLIENT_SECRET!
+  })
+});

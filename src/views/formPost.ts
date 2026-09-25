@@ -1,3 +1,13 @@
+function validateRedirectUri(uri: string): void {
+  try {
+    const parsed = new URL(uri);
+    if (parsed.protocol !== 'https:') {
+      throw new Error(`redirect_uri must use https scheme, got: ${parsed.protocol}`);
+    }
+  } catch (e) {
+    throw new Error(`Invalid redirect_uri: ${uri}`);
+  }
+}
 function escapeHtml(str: string): string {
   return str
     .replace(/&/g, '&amp;')
@@ -8,6 +18,7 @@ function escapeHtml(str: string): string {
 }
 
 export function renderFormPostHtml(redirectUri: string, code: string, state: string): string {
+  validateRedirectUri(redirectUri);
   return `<!DOCTYPE html>
 <html>
 <head><title>Submitting...</title></head>
@@ -25,6 +36,7 @@ export function renderFormPostHtml(redirectUri: string, code: string, state: str
 }
 
 export function renderFormPostErrorHtml(redirectUri: string, error: string, errorDescription: string | null, state: string): string {
+  validateRedirectUri(redirectUri);
   return `<!DOCTYPE html>
 <html>
 <head><title>Submitting...</title></head>

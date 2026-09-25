@@ -1,6 +1,3 @@
-import { SignJWT, jwtVerify, createRemoteJWKSet } from 'jose';
-import { UpstreamProvider, UpstreamUser } from './types';
-
 // Apple Sign In quirks:
 // 1. No userinfo endpoint — user claims are inside the id_token JWT
 // 2. Client secret must be a signed JWT (not a static string)
@@ -10,6 +7,17 @@ import { UpstreamProvider, UpstreamUser } from './types';
 // UPSTREAM_APPLE_CLIENT_SECRET = the PEM private key (.p8 file content)
 // UPSTREAM_APPLE_TEAM_ID       = your Apple Developer Team ID
 // UPSTREAM_APPLE_KEY_ID        = the Key ID of your Sign in with Apple private key
+
+import { SignJWT, jwtVerify, createRemoteJWKSet } from 'jose';
+import { UpstreamProvider, UpstreamUser } from './types';
+import { register } from './registry';
+
+export interface AppleEnv {
+  UPSTREAM_APPLE_CLIENT_ID?: string;
+  UPSTREAM_APPLE_CLIENT_SECRET?: string;
+  UPSTREAM_APPLE_TEAM_ID?: string;
+  UPSTREAM_APPLE_KEY_ID?: string;
+}
 
 export class AppleProvider implements UpstreamProvider {
   readonly name = 'apple';
@@ -27,12 +35,11 @@ export class AppleProvider implements UpstreamProvider {
     url.searchParams.set('redirect_uri', redirectUri);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('scope', 'name email');
-    url.searchParams.set('response_mode', 'form_post'); // Apple requires form_post
+    url.searchParams.set('response_mode', 'form_post');
     url.searchParams.set('state', state);
     return url.toString();
   }
 
-  // Build a signed JWT to use as the Apple client_secret (valid for up to 6 months).
   private async buildClientSecret(clientId: string, pemKey: string): Promise<string> {
     const cleanedPem = pemKey
       .replace(/-----BEGIN PRIVATE KEY-----/, '')
@@ -51,7 +58,7 @@ export class AppleProvider implements UpstreamProvider {
       .setProtectedHeader({ alg: 'ES256', kid: this.keyId })
       .setIssuer(this.teamId)
       .setIssuedAt(now)
-      .setExpirationTime(now + 300) // 5 minutes is sufficient for a token exchange
+      .setExpirationTime(now + 300)
       .setAudience('https://appleid.apple.com')
       .setSubject(clientId)
       .sign(privateKey);
@@ -76,7 +83,6 @@ export class AppleProvider implements UpstreamProvider {
     if (!tokenResp.ok) throw new Error(`Apple token exchange failed: ${tokenResp.status}`);
     const { id_token } = await tokenResp.json() as { id_token: string };
 
-    // Verify and decode the id_token — Apple's JWKS endpoint is the source of truth.
     const JWKS = createRemoteJWKSet(new URL('https://appleid.apple.com/auth/keys'));
     const { payload } = await jwtVerify(id_token, JWKS, {
       issuer: 'https://appleid.apple.com',
@@ -84,13 +90,29 @@ export class AppleProvider implements UpstreamProvider {
     });
 
     const email = (payload.email as string | undefined)?.toLowerCase();
-    if (!email) throw new Error('Apple: no email in id_token — ensure email scope was granted');
+    if (!email) throw new Error('Apple: no email in id_token');
 
     return {
       sub: payload.sub as string,
       email,
       email_verified: !!(payload.email_verified),
-      name: undefined // Apple only sends name on very first login via form_post body, not in id_token
+      name: undefined
     };
   }
 }
+
+register('apple', {
+  label: 'Apple',
+  isReady: (env: any) => !!(env.UPSTREAM_APPLE_CLIENT_ID && env.UPSTREAM_APPLE_CLIENT_SECRET && env.UPSTREAM_APPLE_TEAM_ID && env.UPSTREAM_APPLE_KEY_ID),
+  create: (env: any) => {
+    if (!env.UPSTREAM_APPLE_CLIENT_ID || !env.UPSTREAM_APPLE_CLIENT_SECRET)
+      throw new Error('Apple provider requires UPSTREAM_APPLE_CLIENT_ID and UPSTREAM_APPLE_CLIENT_SECRET');
+    if (!env.UPSTREAM_APPLE_TEAM_ID || !env.UPSTREAM_APPLE_KEY_ID)
+      throw new Error('Apple provider requires UPSTREAM_APPLE_TEAM_ID and UPSTREAM_APPLE_KEY_ID');
+    return new AppleProvider(env.UPSTREAM_APPLE_TEAM_ID, env.UPSTREAM_APPLE_KEY_ID);
+  },
+  credentials: (env: any) => ({
+    clientId: env.UPSTREAM_APPLE_CLIENT_ID!,
+    clientSecret: env.UPSTREAM_APPLE_CLIENT_SECRET!
+  })
+});

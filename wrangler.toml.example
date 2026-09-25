@@ -19,6 +19,8 @@ id = "<YOUR_KV_NAMESPACE_ID>"
 
 [vars]
 ADMIN_ROUTE_PATH = "/console"
+ISSUER_URL = "https://your-worker.your-subdomain.workers.dev"  
+# Set to your actual Worker URL
 
 # Cloudflare Zero Trust (protects the admin console)
 CF_ACCESS_TEAM_NAME = "<YOUR_CF_ACCESS_TEAM_NAME>"

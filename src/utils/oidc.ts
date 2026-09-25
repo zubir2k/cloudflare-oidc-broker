@@ -1,5 +1,8 @@
 import { Env } from '../types';
 
+// Cache the public JWK to avoid parsing the private key on every request
+let cachedPublicJwk: { keys: any[] } | null = null;
+
 export function getOidcConfiguration(issuer: string) {
   return {
     issuer,
@@ -17,7 +20,7 @@ export function getOidcConfiguration(issuer: string) {
     scopes_supported: ['openid', 'email', 'profile'],
     claims_supported: ['sub', 'iss', 'aud', 'exp', 'iat', 'email', 'username', 'preferred_username', 'name'],
     code_challenge_methods_supported: ['S256'],
-    request_parameter_supported: true
+    request_parameter_supported: false
   };
 }
 
@@ -30,21 +33,20 @@ export async function getJwks(env: Env): Promise<Response> {
   }
 
   try {
-    // Parse the private JWK
-    const privateJwk = JSON.parse(env.BROKER_PRIVATE_KEY_JWK);
-
-    // Construct the public JWK using only the public components of the private key.
-    // This avoids the "non-extractable CryptoKey" error entirely.
-    const publicJwk = {
-      kty: privateJwk.kty,
-      use: 'sig',
-      alg: 'RS256',
-      kid: privateJwk.kid,
-      n:   privateJwk.n,
-      e:   privateJwk.e
-    };
-
-    return Response.json({ keys: [publicJwk] });
+    if (!cachedPublicJwk) {
+      const privateJwk = JSON.parse(env.BROKER_PRIVATE_KEY_JWK);
+      cachedPublicJwk = {
+        keys: [{
+          kty: privateJwk.kty,
+          use: 'sig',
+          alg: 'RS256',
+          kid: privateJwk.kid,
+          n:   privateJwk.n,
+          e:   privateJwk.e
+        }]
+      };
+    }
+    return Response.json(cachedPublicJwk);
   } catch (err: any) {
     return new Response(JSON.stringify({ error: 'Failed to parse JWK', detail: err.message }), {
       status: 500,

@@ -2,23 +2,7 @@ export interface Env {
   DB: D1Database;
   SESSIONS_KV: KVNamespace;
   ADMIN_ROUTE_PATH: string;
-
-  // Per-provider upstream OAuth credentials (set only the providers you use)
-  // Secrets set via: npx wrangler secret put <NAME>
-  UPSTREAM_GOOGLE_CLIENT_ID?: string;
-  UPSTREAM_GOOGLE_CLIENT_SECRET?: string;
-
-  UPSTREAM_MICROSOFT_CLIENT_ID?: string;
-  UPSTREAM_MICROSOFT_CLIENT_SECRET?: string;
-  UPSTREAM_MICROSOFT_TENANT?: string;          // tenant ID or 'common' (default: 'common')
-
-  UPSTREAM_GITHUB_CLIENT_ID?: string;
-  UPSTREAM_GITHUB_CLIENT_SECRET?: string;
-
-  UPSTREAM_APPLE_CLIENT_ID?: string;
-  UPSTREAM_APPLE_CLIENT_SECRET?: string;       // .p8 PEM key content
-  UPSTREAM_APPLE_TEAM_ID?: string;
-  UPSTREAM_APPLE_KEY_ID?: string;
+  ISSUER_URL?: string;                 // Optional explicit issuer URL (recommended for production)  
 
   // Admin console (Cloudflare Zero Trust)
   CF_ACCESS_TEAM_NAME: string;
@@ -28,6 +12,10 @@ export interface Env {
   // Broker signing key (RS256 private JWK).
   // The public key is derived from this at runtime — no separate public key secret needed.
   BROKER_PRIVATE_KEY_JWK: string;
+
+  // Dynamic provider credentials are defined and validated within each provider module.
+  // TypeScript will allow access to them via index signature or casting.
+  [key: string]: any;
 }
 
 export interface ClientRecord {
@@ -63,6 +51,7 @@ export interface BrokerSession {
   codeChallengeMethod?: string;
   responseMode: 'query' | 'form_post';
   authTime?: number;
+  upstreamNonce: string;               // Nonce sent to upstream provider for ID token validation
 }
 
 export interface DownstreamAuthCode {

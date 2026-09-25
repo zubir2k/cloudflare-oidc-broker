@@ -10,8 +10,11 @@ function bufferToBase64Url(buffer: ArrayBuffer): string {
     .replace(/=+$/, '');
 }
 
-export async function verifyPkce(verifier: string, challenge: string, method: string = 'S256'): Promise<boolean> {
-  if (!challenge) return true;
+export async function verifyPkce(verifier: string, challenge: string, method: string): Promise<boolean> {
+  // Fail closed: require explicit verifier, challenge, and method
+  if (!verifier || !challenge || !method) {
+    return false;
+  }
 
   // Reject 'plain' or any algorithm other than S256 (OAuth 2.1 compliance)
   if (method !== 'S256') {
