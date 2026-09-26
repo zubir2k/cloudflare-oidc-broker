@@ -21,6 +21,7 @@ export interface AppleEnv {
 
 export class AppleProvider implements UpstreamProvider {
   readonly name = 'apple';
+  readonly issuer = 'https://appleid.apple.com';
   private teamId: string;
   private keyId: string;
 
@@ -29,7 +30,7 @@ export class AppleProvider implements UpstreamProvider {
     this.keyId = keyId;
   }
 
-  buildAuthUrl({ clientId, redirectUri, state }: { clientId: string; redirectUri: string; state: string }): string {
+  buildAuthUrl({ clientId, redirectUri, state, nonce }: { clientId: string; redirectUri: string; state: string; nonce: string }): string {
     const url = new URL('https://appleid.apple.com/auth/authorize');
     url.searchParams.set('client_id', clientId);
     url.searchParams.set('redirect_uri', redirectUri);
@@ -64,8 +65,8 @@ export class AppleProvider implements UpstreamProvider {
       .sign(privateKey);
   }
 
-  async exchangeCode({ code, clientId, clientSecret, redirectUri }: {
-    code: string; clientId: string; clientSecret: string; redirectUri: string;
+  async exchangeCode({ code, clientId, clientSecret, redirectUri, expectedNonce }: {
+    code: string; clientId: string; clientSecret: string; redirectUri: string; expectedNonce: string;
   }): Promise<UpstreamUser> {
     const appleClientSecret = await this.buildClientSecret(clientId, clientSecret);
 
@@ -85,7 +86,7 @@ export class AppleProvider implements UpstreamProvider {
 
     const JWKS = createRemoteJWKSet(new URL('https://appleid.apple.com/auth/keys'));
     const { payload } = await jwtVerify(id_token, JWKS, {
-      issuer: 'https://appleid.apple.com',
+      issuer: this.issuer,
       audience: clientId
     });
 

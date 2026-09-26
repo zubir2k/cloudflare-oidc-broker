@@ -366,7 +366,7 @@ export default {
       const sessionCookie = `user_session=${encodeURIComponent(JSON.stringify({
         email: upstreamUser.email,
         authTime
-      }))}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=3600`;
+      }))}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=3600`;
 
       if (session.responseMode === 'form_post') {
         const error = url.searchParams.get('error');
@@ -652,9 +652,10 @@ export default {
           if (parts.length === 3) {
             const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
             logoutEmail = payload.email as string | undefined;
+            console.log(`[Logout] Extracted email from id_token_hint: ${logoutEmail}`);
           }
-        } catch {
-          // Malformed hint — ignore and proceed without purging
+        } catch (e) {
+          console.warn('[Logout] Failed to parse id_token_hint:', e);
         }
       }
 
@@ -665,9 +666,12 @@ export default {
           if (logoutSessionMatch) {
             const cookieData = JSON.parse(decodeURIComponent(logoutSessionMatch[1]));
             logoutEmail = cookieData.email as string | undefined;
+            console.log(`[Logout] Extracted email from session cookie: ${logoutEmail}`);
+          } else {
+            console.warn('[Logout] No user_session cookie found in request.');
           }
-        } catch {
-          // Ignore cookie parse errors
+        } catch (e) {
+          console.warn('[Logout] Failed to parse session cookie:', e);
         }
       }
 
@@ -675,15 +679,24 @@ export default {
         const userTokensKey = `user_tokens:${logoutEmail}`;
         const indexRaw = await env.SESSIONS_KV.get(userTokensKey);
         if (indexRaw) {
-          const tokenIds: string[] = JSON.parse(indexRaw);
-          await Promise.all([
-            ...tokenIds.map(id => env.SESSIONS_KV.delete(`access_token:${id}`)),
-            env.SESSIONS_KV.delete(userTokensKey)
-          ]);
+          try {
+            const tokenIds: string[] = JSON.parse(indexRaw);
+            await Promise.all([
+              ...tokenIds.map(id => env.SESSIONS_KV.delete(`access_token:${id}`)),
+              env.SESSIONS_KV.delete(userTokensKey)
+            ]);
+            console.log(`[Logout] Successfully purged ${tokenIds.length} tokens for ${logoutEmail}`);
+          } catch (e) {
+            console.error('[Logout] Error purging user tokens from KV:', e);
+          }
+        } else {
+          console.log(`[Logout] No KV index found for ${logoutEmail}. User may have already logged out or session expired.`);
         }
+      } else {
+        console.error('[Logout] CRITICAL: Could not identify user email. KV entries will NOT be purged. Ensure downstream app sends id_token_hint or browser sends cookies.');
       }
 
-      const clearCookie = 'user_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0';
+      const clearCookie = 'user_session=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0';
 
       if (postLogoutRedirectUri) {
         const allClients = await env.DB.prepare('SELECT redirect_uris FROM clients WHERE is_active = 1').all<{ redirect_uris: string }>();
@@ -696,14 +709,18 @@ export default {
         const isAllowed = !!requestedOrigin && allAllowedUris.some(u => getOrigin(u) === requestedOrigin);
 
         if (!isAllowed) {
-          return addSecurityHeaders(new Response('Invalid post_logout_redirect_uri: not registered for any active client.', { status: 400 }));
+          return addSecurityHeaders(new Response('Invalid post_logout_redirect_uri: not registered for any active client.', { 
+            status: 400,
+            headers: { 'Cache-Control': 'no-store' }
+          }));
         }
 
         return addSecurityHeaders(new Response(null, {
           status: 302,
           headers: {
             'Location': postLogoutRedirectUri,
-            'Set-Cookie': clearCookie
+            'Set-Cookie': clearCookie,
+            'Cache-Control': 'no-store'
           }
         }));
       }
@@ -711,7 +728,8 @@ export default {
       return addSecurityHeaders(new Response('You have been logged out.', {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
-          'Set-Cookie': clearCookie
+          'Set-Cookie': clearCookie,
+          'Cache-Control': 'no-store'
         }
       }));
     }

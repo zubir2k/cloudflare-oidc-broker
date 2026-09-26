@@ -10,8 +10,9 @@ export interface GitHubEnv {
 // because GitHub users can hide their email from the basic /user endpoint.
 export class GitHubProvider implements UpstreamProvider {
   readonly name = 'github';
+  readonly issuer = 'https://github.com';
 
-  buildAuthUrl({ clientId, redirectUri, state }: { clientId: string; redirectUri: string; state: string }): string {
+  buildAuthUrl({ clientId, redirectUri, state, nonce }: { clientId: string; redirectUri: string; state: string; nonce: string }): string {
     const url = new URL('https://github.com/login/oauth/authorize');
     url.searchParams.set('client_id', clientId);
     url.searchParams.set('redirect_uri', redirectUri);
@@ -20,8 +21,8 @@ export class GitHubProvider implements UpstreamProvider {
     return url.toString();
   }
 
-  async exchangeCode({ code, clientId, clientSecret, redirectUri }: {
-    code: string; clientId: string; clientSecret: string; redirectUri: string;
+  async exchangeCode({ code, clientId, clientSecret, redirectUri, expectedNonce }: {
+    code: string; clientId: string; clientSecret: string; redirectUri: string; expectedNonce: string;
   }): Promise<UpstreamUser> {
     const tokenResp = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',

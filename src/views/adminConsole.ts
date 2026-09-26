@@ -517,13 +517,13 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
         const select = document.getElementById('clientProvider');
         Array.from(select.options).forEach(opt => {
           const p = providers.find(p => p.id === opt.value);
-          if (p && !p.ready) {
+          if (p && !p.isReady) {
             opt.disabled = true;
             opt.text = p.label + ' (not configured)';
             opt.title = 'Set UPSTREAM_' + p.id.toUpperCase() + '_CLIENT_ID and UPSTREAM_' + p.id.toUpperCase() + '_CLIENT_SECRET in wrangler secrets';
           }
         });
-        const firstReady = providers.find(p => p.ready);
+        const firstReady = providers.find(p => p.isReady);
         if (firstReady) select.value = firstReady.id;
       } catch (e) { console.warn('Could not load providers', e); }
     }

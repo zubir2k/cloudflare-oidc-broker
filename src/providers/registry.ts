@@ -50,7 +50,7 @@ export interface ProviderMetadata {
 }
 
 // Returns all registered providers with their readiness status for the UI
-export function getAvailableProviders(env: any): ProviderMetadata[] {
+export function getRegisteredProviders(env: any): ProviderMetadata[] {
   const result: ProviderMetadata[] = [];
   for (const [id, reg] of registry.entries()) {
     result.push({
