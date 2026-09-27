@@ -50,7 +50,7 @@ UPSTREAM_GOOGLE_CLIENT_ID = "<YOUR_GOOGLE_CLIENT_ID>"
 # Secret: npx wrangler secret put UPSTREAM_APPLE_CLIENT_SECRET  # .p8 PEM key content
 
 # Discord (optional)
-UPSTREAM_DISCORD_CLIENT_ID = "<YOUR_DISCORD_CLIENT_ID>"
+# UPSTREAM_DISCORD_CLIENT_ID = "<YOUR_DISCORD_CLIENT_ID>"
 # Secret: wrangler secret put UPSTREAM_DISCORD_CLIENT_SECRET
 
 # Broker signing key (RS256 private JWK).
