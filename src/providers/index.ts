@@ -4,6 +4,7 @@ import './google';
 import './microsoft';
 import './github';
 import './apple';
+import './discord';
 
 export { UpstreamProvider } from './types';
 export type { UpstreamUser } from './types';

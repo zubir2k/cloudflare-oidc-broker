@@ -181,10 +181,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
             <div>
               <label>Upstream Provider</label>
               <select id="clientProvider">
-                <option value="google">Google</option>
-                <option value="microsoft">Microsoft</option>
-                <option value="github">GitHub</option>
-                <option value="apple">Apple</option>
+                <option value="" disabled selected>Loading providers...</option>
               </select>
             </div>
             <div style="display:flex; align-items:center; gap:0.5rem; padding-top:1.5rem;">
@@ -338,7 +335,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
               + '<button class="icon-btn" title="Toggle" onclick="toggleSec(' + idx + ',\\\'' + encodedSecret + '\\\')">&#128065;</button>'
               + '<button class="icon-btn" title="Copy" onclick="copySec(this,\\\'' + encodedSecret + '\\\')">&#128203;</button></div>'
             : '<span class="muted small">None (Public)</span>') + '</td>' +
-          '<td><span class="badge app">' + (c.provider || 'google') + '</span></td>' +
+          '<td><span class="badge app">' + (c.provider || 'unknown') + '</span></td>' +
           '<td>' + (c.require_pkce !== 0 ? '<span class="badge pkce">S256</span>' : '<span class="badge pkce-off">exempt</span>') + '</td>' +
           '<td>' + uris + '</td>' +
           '<td><span class="badge ' + (c.is_active ? 'active' : 'inactive') + '">' + (c.is_active ? 'ACTIVE' : 'DISABLED') + '</span></td>' +
@@ -390,7 +387,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
       document.getElementById('clientId').disabled = true;
       document.getElementById('clientSecret').value = c.client_secret || '';
       document.getElementById('clientUris').value = (c.redirect_uris || []).join(', ');
-      document.getElementById('clientProvider').value = c.provider || 'google';
+      document.getElementById('clientProvider').value = c.provider || '';
       document.getElementById('clientRequirePkce').checked = c.require_pkce !== 0;
       document.getElementById('clientActive').checked = c.is_active !== 0;
 
@@ -403,7 +400,12 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
     function resetClientForm() {
       document.getElementById('clientForm').reset();
       document.getElementById('clientId').disabled = false;
-      document.getElementById('clientProvider').value = 'google';
+      
+      // Safely select the first ready provider instead of hardcoding 'google'
+      const select = document.getElementById('clientProvider');
+      const firstReady = Array.from(select.options).find(opt => !opt.disabled);
+      if (firstReady) select.value = firstReady.value;
+
       document.getElementById('clientRequirePkce').checked = true;
       document.getElementById('clientActive').checked = true;
       document.getElementById('clientFormTitle').innerText = 'Register Downstream Client Application';
@@ -515,14 +517,23 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
         if (!res.ok) return;
         const providers = await res.json();
         const select = document.getElementById('clientProvider');
-        Array.from(select.options).forEach(opt => {
-          const p = providers.find(p => p.id === opt.value);
-          if (p && !p.isReady) {
-            opt.disabled = true;
-            opt.text = p.label + ' (not configured)';
+        
+        // Clear loading placeholder
+        select.innerHTML = '';
+        
+        // Dynamically build options from registered providers
+        providers.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.text = p.isReady ? p.label : p.label + ' (not configured)';
+          opt.disabled = !p.isReady;
+          if (!p.isReady) {
             opt.title = 'Set UPSTREAM_' + p.id.toUpperCase() + '_CLIENT_ID and UPSTREAM_' + p.id.toUpperCase() + '_CLIENT_SECRET in wrangler secrets';
           }
+          select.appendChild(opt);
         });
+
+        // Auto-select the first ready provider
         const firstReady = providers.find(p => p.isReady);
         if (firstReady) select.value = firstReady.id;
       } catch (e) { console.warn('Could not load providers', e); }
