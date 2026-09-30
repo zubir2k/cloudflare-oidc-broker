@@ -139,6 +139,13 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
       justify-content: center;
     }
     .icon-btn-action:hover { border-color: var(--primary); }
+	.badge.nric { 
+	  background: #1e3a5f; 
+	  color: #7dd3fc; 
+	  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	  font-size: 0.7rem;
+	  letter-spacing: 0.02em;
+	}	
   </style>
 </head>
 <body>
@@ -236,8 +243,8 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
         <form id="mappingForm">
           <div class="form-grid">
             <div>
-              <label>Google Email</label>
-              <input type="email" id="userEmail" placeholder="user@gmail.com" required>
+              <label>Identifier (Email/ID)</label>
+              <input type="text" id="userEmail" placeholder="user@gmail.com or ID-xxxx" required>
             </div>
             <div>
               <label>Target Application Scope</label>
@@ -272,7 +279,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
           <table>
             <thead>
               <tr>
-                <th>Google Email</th>
+                <th>Identifier</th>
                 <th>Target App</th>
                 <th>Local Target Username</th>
                 <th>Display Name</th>
@@ -291,6 +298,15 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
   </div>
 
   <script>
+	function formatIdentifier(email) {
+	  if (email.endsWith('@mydid.local')) {
+		const hash = email.replace('@mydid.local', '');
+		const truncated = 'NRIC-' + hash.slice(0, 5) + '...' + hash.slice(-5);
+		return '<span class="badge nric" title="' + email + '">' + truncated + '</span>';
+	  }
+	  return '<strong>' + email + '</strong>';
+	}  
+	
     const BASE_API = '${adminBasePath}/api';
     let loadedClients = [];
     let originalEditScope = null;
@@ -359,7 +375,7 @@ export function renderAdminConsoleHtml(userEmail: string, adminBasePath: string)
           ? '<span class="badge global">ALL APPS (*)</span>'
           : '<span class="badge app">' + m.client_id + '</span>';
         return '<tr>' +
-          '<td class="mono"><strong>' + m.email + '</strong></td>' +
+          '<td>' + formatIdentifier(m.email) + '</td>' +
           '<td>' + appBadge + '</td>' +
           '<td><span class="badge user">' + m.username + '</span></td>' +
           '<td>' + (m.display_name || '-') + '</td>' +

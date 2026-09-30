@@ -83,7 +83,7 @@ export function renderAccessDeniedHtml(email: string, redirectUri: string): stri
     <body>
       <div class="error-container">
         <h1>Access Denied</h1>
-        <p>Your account <span class="email">${escapeHtml(email)}</span> is not authorized to access this application.</p>
+        <p>Your account is not authorized to access this application.</p>
         <p>If you believe this is an error, please contact your administrator to add your account to the authorized users list.</p>
         
         <button class="action-btn" onclick="handleReturn()">Return to Application</button>

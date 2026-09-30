@@ -343,19 +343,20 @@ export default {
 
       const authTime = session.authTime || Math.floor(Date.now() / 1000);
       const brokerCode = crypto.randomUUID();
-      const codePayload: DownstreamAuthCode = {
-        clientId: session.clientId,
-        sub: brokerSub,
-        email: upstreamUser.email,
-        emailVerified: upstreamUser.email_verified,
-        username: mappedUser.username,
-        name: mappedUser.display_name || upstreamUser.name || mappedUser.username,
-        nonce: session.nonce,
-        requirePkce: session.requirePkce,
-        codeChallenge: session.codeChallenge,
-        codeChallengeMethod: session.codeChallengeMethod,
-        authTime
-      };
+  	  const codePayload: DownstreamAuthCode = {
+	    clientId: session.clientId,
+	    sub: brokerSub,
+	    email: upstreamUser.email,
+	    emailVerified: upstreamUser.email_verified,
+	    username: mappedUser.username,
+	    name: mappedUser.display_name || upstreamUser.name || mappedUser.username,
+	    nonce: session.nonce,
+	    requirePkce: session.requirePkce,
+	    codeChallenge: session.codeChallenge,
+	    codeChallengeMethod: session.codeChallengeMethod,
+	    authTime,
+	    preferJwtAccessToken: upstreamUser.preferJwtAccessToken === true
+	  };
 
       await env.SESSIONS_KV.put(
         `code:${brokerCode}`,
@@ -533,26 +534,45 @@ export default {
         privateKeyJwk: env.BROKER_PRIVATE_KEY_JWK
       });
 
-      const accessToken = crypto.randomUUID();
+	  let accessToken: string;
 
-      await env.SESSIONS_KV.put(
-        `access_token:${accessToken}`,
-        JSON.stringify({
-          sub: authData.sub,
-          email: authData.email,
-          emailVerified: authData.emailVerified,
-          username: authData.username,
-          name: authData.name
-        }),
-        { expirationTtl: 3600 }
-      );
+	  if (authData.preferJwtAccessToken) {
+	    // PII-safe path: JWT access token — nothing written to KV after this point.
+	    // /userinfo will verify it cryptographically using the broker public key.
+	    accessToken = await mintDownstreamIdToken({
+	  	  sub: authData.sub,
+		  email: authData.email,
+		  emailVerified: authData.emailVerified,
+		  username: authData.username,
+		  name: authData.name,
+		  clientId: authData.clientId,
+		  issuer,
+		  nonce: authData.nonce,
+		  authTime: authData.authTime,
+		  privateKeyJwk: env.BROKER_PRIVATE_KEY_JWK
+	    });
+	  } else {
+	    // Standard opaque path: UUID stored in KV for /userinfo lookup
+	    accessToken = crypto.randomUUID();
 
-      const userTokensKey = `user_tokens:${authData.email}`;
-      const existingIndexRaw = await env.SESSIONS_KV.get(userTokensKey);
-      const existingTokens: string[] = existingIndexRaw ? JSON.parse(existingIndexRaw) : [];
-      existingTokens.push(accessToken);
-      await env.SESSIONS_KV.put(userTokensKey, JSON.stringify(existingTokens), { expirationTtl: 3600 });
+	    await env.SESSIONS_KV.put(
+		  `access_token:${accessToken}`,
+		  JSON.stringify({
+		    sub: authData.sub,
+		    email: authData.email,
+		    emailVerified: authData.emailVerified,
+		    username: authData.username,
+		    name: authData.name
+		  }),
+		  { expirationTtl: 3600 }
+	    );
 
+	    const userTokensKey = `user_tokens:${authData.email}`;
+	    const existingIndexRaw = await env.SESSIONS_KV.get(userTokensKey);
+	    const existingTokens: string[] = existingIndexRaw ? JSON.parse(existingIndexRaw) : [];
+	    existingTokens.push(accessToken);
+	    await env.SESSIONS_KV.put(userTokensKey, JSON.stringify(existingTokens), { expirationTtl: 3600 });
+	  }
       // RFC 6749 §5.1: Success response
       return tokenResponse({
         access_token: accessToken,
@@ -565,40 +585,72 @@ export default {
     // -------------------------------------------------------------
     // 6. Userinfo Endpoint (OIDC Standard)
     // -------------------------------------------------------------
-    if (pathname === '/userinfo') {
-      const authHeader = request.headers.get('authorization') || '';
-      const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+	if (pathname === '/userinfo') {
+	  const authHeader = request.headers.get('authorization') || '';
+	  const accessToken = authHeader.replace(/^Bearer\s+/i, '').trim();
 
-      if (!accessToken) {
-        return addSecurityHeaders(Response.json({
-          error: 'unauthorized',
-          error_description: 'Missing access token'
-        }, { status: 401 }));
-      }
+	  if (!accessToken) {
+		return addSecurityHeaders(Response.json({
+		  error: 'unauthorized',
+		  error_description: 'Missing access token'
+		}, { status: 401 }));
+	  }
 
-      const cachedRaw = await env.SESSIONS_KV.get(`access_token:${accessToken}`);
-      if (!cachedRaw) {
-        return addSecurityHeaders(Response.json({
-          error: 'invalid_token',
-          error_description: 'Token expired or invalid'
-        }, { status: 401 }));
-      }
+	  let userData: {
+		sub: string;
+		email: string;
+		emailVerified: boolean;
+		username: string;
+		name: string;
+	  };
 
-      const userData = JSON.parse(cachedRaw);
-      return addSecurityHeaders(Response.json({
-        sub: userData.sub,
-        email: userData.email,
-        email_verified: userData.emailVerified === true,
-        username: userData.username,
-        preferred_username: userData.username,
-        name: userData.name
-      }, {
-        headers: {
-          'Cache-Control': 'no-store, no-cache, must-revalidate',
-          'Pragma': 'no-cache'
-        }
-      }));
-    }
+	  // JWT access tokens have three dot-separated segments
+	  if (accessToken.split('.').length === 3) {
+		// JWT path — verify cryptographically, no KV read needed
+		try {
+		  const { getPublicKeyFromPrivate } = await import('./utils/jwt');
+		  const publicKey = await getPublicKeyFromPrivate(env.BROKER_PRIVATE_KEY_JWK);
+		  const { jwtVerify } = await import('jose');
+		  const { payload } = await jwtVerify(accessToken, publicKey, { issuer });
+		  userData = {
+			sub: payload.sub as string,
+			email: payload.email as string,
+			emailVerified: payload.email_verified as boolean,
+			username: payload.preferred_username as string || payload.username as string,
+			name: payload.name as string
+		  };
+		} catch {
+		  return addSecurityHeaders(Response.json({
+			error: 'invalid_token',
+			error_description: 'Token expired or invalid'
+		  }, { status: 401 }));
+		}
+	  } else {
+		// Opaque path — KV lookup (standard providers: Google, GitHub, etc.)
+		const cachedRaw = await env.SESSIONS_KV.get(`access_token:${accessToken}`);
+		if (!cachedRaw) {
+		  return addSecurityHeaders(Response.json({
+			error: 'invalid_token',
+			error_description: 'Token expired or invalid'
+		  }, { status: 401 }));
+		}
+		userData = JSON.parse(cachedRaw);
+	  }
+
+	  return addSecurityHeaders(Response.json({
+		sub: userData.sub,
+		email: userData.email,
+		email_verified: userData.emailVerified === true,
+		username: userData.username,
+		preferred_username: userData.username,
+		name: userData.name
+	  }, {
+		headers: {
+		  'Cache-Control': 'no-store, no-cache, must-revalidate',
+		  'Pragma': 'no-cache'
+		}
+	  }));
+	}
 
     // -------------------------------------------------------------
     // 7. Token Revocation Endpoint (RFC 7009)
@@ -633,7 +685,9 @@ export default {
         }
       }
 
-      await env.SESSIONS_KV.delete(`access_token:${token}`);
+	  if (token.split('.').length !== 3) {
+	    await env.SESSIONS_KV.delete(`access_token:${token}`);
+	  }
       return addSecurityHeaders(new Response(null, { status: 200 }));
     }
 
@@ -802,37 +856,78 @@ export default {
         return addSecurityHeaders(Response.json({ success: true }));
       }
 
-      if (apiPath === '/api/mappings' && request.method === 'POST') {
-        const b = (await request.json()) as any;
+	  if (apiPath === '/api/mappings' && request.method === 'POST') {
+	    const b = (await request.json()) as any;
 
-        if (!b.email || typeof b.email !== 'string') {
-          return addSecurityHeaders(Response.json({ error: 'invalid_request', error_description: 'email is required' }, { status: 400 }));
-        }
-        if (!b.username || typeof b.username !== 'string') {
-          return addSecurityHeaders(Response.json({ error: 'invalid_request', error_description: 'username is required' }, { status: 400 }));
-        }
+	    if (!b.email || typeof b.email !== 'string') {
+		  return addSecurityHeaders(Response.json({
+		    error: 'invalid_request',
+		    error_description: 'email is required'
+		  }, { status: 400 }));
+	    }
+	    if (!b.username || typeof b.username !== 'string') {
+		  return addSecurityHeaders(Response.json({
+		    error: 'invalid_request',
+		    error_description: 'username is required'
+		  }, { status: 400 }));
+	    }
 
-        const targetClient = b.client_id || '*';
-        const originalClient = b.original_client_id;
+	    const targetClient = b.client_id || '*';
+	    const originalClient = b.original_client_id;
 
-        if (originalClient && originalClient !== targetClient) {
-          await env.DB.prepare('DELETE FROM user_mappings WHERE email = ? AND client_id = ?')
-            .bind(b.email.toLowerCase().trim(), originalClient).run();
-        }
+	    // Resolve the identifier — if the targeted client uses mydigitalid provider,
+	    // treat a raw numeric input as an NRIC and hash it to the synthetic email.
+	    // If the input already contains '@' it's passed through untouched
+	    // (admin pasted a pre-hashed value or re-saving an existing mapping).
+		let resolvedEmail = (b.email || '').trim();
 
-        await env.DB.prepare(`
-          INSERT INTO user_mappings (email, client_id, username, display_name, is_active)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(email, client_id) DO UPDATE SET
-            username = excluded.username,
-            display_name = excluded.display_name,
-            is_active = excluded.is_active
-        `)
-          .bind(b.email.toLowerCase().trim(), targetClient, b.username.trim(), (b.display_name || '').trim(), b.is_active ? 1 : 0)
-          .run();
+		if (resolvedEmail.toUpperCase().startsWith('NRIC-')) {
+		  const cleaned = resolvedEmail.slice(5).replace(/[^0-9]/g, '');
+		  if (cleaned.length < 12) {
+			return addSecurityHeaders(Response.json({
+			  error: 'invalid_request',
+			  error_description: 'Invalid NRIC — must be 12 digits after NRIC- prefix'
+			}, { status: 400 }));
+		  }
+		  if (!env.MYDIGITALID_NRIC_SALT) {
+			return addSecurityHeaders(Response.json({
+			  error: 'server_error',
+			  error_description: 'MYDIGITALID_NRIC_SALT is not configured'
+			}, { status: 500 }));
+		  }
+		  const encoder = new TextEncoder();
+		  const data = encoder.encode(cleaned + env.MYDIGITALID_NRIC_SALT);  // salt is NRIC-specific
+		  const digest = await crypto.subtle.digest('SHA-256', data);
+		  const hex = Array.from(new Uint8Array(digest))
+			.map(b => b.toString(16).padStart(2, '0')).join('');
+		  resolvedEmail = `${hex}@mydid.local`;
 
-        return addSecurityHeaders(Response.json({ success: true }));
-      }
+		// Future identifiers follow same pattern with their own logic
+		// } else if (resolvedEmail.toUpperCase().startsWith('PHONE-')) {
+		//   ...
+
+		} else {
+		  resolvedEmail = resolvedEmail.toLowerCase();
+		}
+
+	    if (originalClient && originalClient !== targetClient) {
+		  await env.DB.prepare('DELETE FROM user_mappings WHERE email = ? AND client_id = ?')
+		    .bind(resolvedEmail, originalClient).run();
+	    }
+
+	    await env.DB.prepare(`
+		  INSERT INTO user_mappings (email, client_id, username, display_name, is_active)
+		  VALUES (?, ?, ?, ?, ?)
+		  ON CONFLICT(email, client_id) DO UPDATE SET
+		    username = excluded.username,
+		    display_name = excluded.display_name,
+		    is_active = excluded.is_active
+	    `)
+		  .bind(resolvedEmail, targetClient, b.username.trim(), (b.display_name || '').trim(), b.is_active ? 1 : 0)
+		  .run();
+
+	    return addSecurityHeaders(Response.json({ success: true, email: resolvedEmail }));
+	  }
 
       if (apiPath.startsWith('/api/mappings/') && request.method === 'DELETE') {
         const rawParam = decodeURIComponent(apiPath.replace('/api/mappings/', ''));

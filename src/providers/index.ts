@@ -5,6 +5,7 @@ import './microsoft';
 import './github';
 import './apple';
 import './discord';
+import './mydigitalid';
 
 export { UpstreamProvider } from './types';
 export type { UpstreamUser } from './types';

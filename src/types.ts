@@ -66,4 +66,5 @@ export interface DownstreamAuthCode {
   codeChallenge?: string;
   codeChallengeMethod?: string;
   authTime?: number;
+  preferJwtAccessToken?: boolean; // Carried from provider signal — triggers KV-free /token path
 }

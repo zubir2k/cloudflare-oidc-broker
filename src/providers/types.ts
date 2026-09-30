@@ -4,6 +4,7 @@ export interface UpstreamUser {
   email: string;           // Lowercase email address
   email_verified: boolean;
   name?: string;
+  preferJwtAccessToken?: boolean; // If true, broker issues JWT access token (no KV write post-/token)
 }
 
 // Every upstream provider must implement this interface
